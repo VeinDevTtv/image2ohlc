@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Automated pipeline that converts TradingView candlestick chart screenshots into exact OHLC values",
   "main": "dist/index.js",
+  "bin": {
+    "scan": "./bin/scan.js"
+  },
   "scripts": {
     "build": "tsc",
     "lint": "eslint src/**/*.ts",
@@ -39,7 +42,11 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@types/sharp": "^0.31.1",
+    "sharp": "^0.34.4",
+    "tsconfig-paths": "^4.2.0"
+  },
   "engines": {
     "node": ">=18.0.0"
   }

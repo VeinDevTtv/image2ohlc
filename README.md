@@ -44,6 +44,34 @@ npm run format
 
 ## Usage
 
+### CLI Image Scanner
+
+The project includes a CLI tool for scanning images and extracting metadata:
+
+```bash
+# Build the project first
+npm run build
+
+# Scan an image file
+node bin/scan.js path/to/image.png
+
+# Example output:
+# Image Scan Results:
+# ==================
+# File: /path/to/image.png
+# Dimensions: 800 x 600 pixels
+# Format: png
+# Device Pixel Ratio: 2
+# DPI: 144
+# 
+# Additional Metadata:
+# Channels: 3
+# Color Space: srgb
+# Color Profile: Present
+```
+
+### Main Application
+
 ```bash
 # Start the application
 npm start

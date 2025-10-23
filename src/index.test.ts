@@ -1,4 +1,4 @@
-import { main } from '../index';
+import { main } from './index';
 
 describe('Main Application', () => {
   it('should run without errors', () => {

@@ -23,7 +23,7 @@ module.exports = {
       statements: 80,
     },
   },
-  moduleNameMapping: {
+  moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@/common/(.*)$': '<rootDir>/src/common/$1',
     '^@/core/(.*)$': '<rootDir>/src/core/$1',

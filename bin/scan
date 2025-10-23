@@ -1,0 +1,52 @@
+#!/usr/bin/env node
+
+/**
+ * CLI tool to scan images and extract dimensions and device pixel ratio
+ */
+
+const { scanImage } = require('../dist/core/image-scanner');
+const { resolve } = require('path');
+
+async function main(): Promise<void> {
+  const args = process.argv.slice(2);
+  
+  if (args.length === 0) {
+    console.error('Usage: scan <image-path>');
+    console.error('Example: scan ./test-images/sample.png');
+    process.exit(1);
+  }
+
+  const imagePath = resolve(args[0]);
+  
+  try {
+    const result = await scanImage(imagePath);
+    
+    console.log('Image Scan Results:');
+    console.log('==================');
+    console.log(`File: ${imagePath}`);
+    console.log(`Dimensions: ${result.width} x ${result.height} pixels`);
+    console.log(`Format: ${result.format}`);
+    console.log(`Device Pixel Ratio: ${result.devicePixelRatio || 'Not detected'}`);
+    console.log(`DPI: ${result.density || 'Not available'}`);
+    
+    if (result.metadata) {
+      console.log('\nAdditional Metadata:');
+      console.log(`Channels: ${result.metadata.channels}`);
+      console.log(`Color Space: ${result.metadata.space}`);
+      if (result.metadata.hasProfile) {
+        console.log('Color Profile: Present');
+      }
+    }
+    
+  } catch (error) {
+    console.error(`Error scanning image: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error('Unexpected error:', error);
+    process.exit(1);
+  });
+}
