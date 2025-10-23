@@ -1,0 +1,178 @@
+---
+alwaysApply: true
+---
+
+# Agent Rules (rules.mdc)
+
+These rules are the directives the Cursor agent must follow while implementing the candlestick-image→OHLC extractor. Save this file as `rules.mdc` and load it into the agent's workspace before coding.
+
+## 1 — General goals
+
+* Produce an automated pipeline that converts a screenshot of a TradingView NASDAQ candlestick chart into exact OHLC (open, high, low, close) values per candle and timestamps when available.
+* Prioritize accuracy first, then performance. Aim for pixel-to-price mapping error ≤ 0.1% for standard-resolution screenshots; document cases where this may fail.
+* All code must be TypeScript (Node + optional browser module), strongly typed, with unit tests for core algorithms.
+
+## 2 — Input assumptions & validation
+
+* Accept image inputs (PNG/JPEG/WebP). Detect device pixel ratio (retina) metadata when available and adjust.
+* If axis calibration is ambiguous, require one of the following fallback inputs: (a) two clicked calibration points from the user, or (b) detected numeric axis labels via OCR.
+* Reject or flag images with >10° rotation unless user agrees to manual deskew calibration.
+
+## 3 — Preprocessing rules
+
+* Run automatic deskew (Hough-line or edge-based) with tolerance ±5°. If confidence low, request manual corner clicks.
+* Convert to a lossless working format (RGBA) and maintain original DPI metadata.
+* Apply adaptive contrast and denoising before edge/color segmentation.
+
+## 4 — Axis detection & calibration
+
+* Try OCR (Tesseract.js) to read price labels on the y-axis and timestamps/x-axis. If OCR confidence <70% for labels, switch to interactive calibration (agent will prompt the user to click two y-axis values and two x-axis time markers).
+* Detect linear vs logarithmic scale; prefer linear unless log label found (e.g., exponential notation, 'log', or axis tick spacing suggests log).
+
+## 5 — Candle detection rules
+
+* Use color-based segmentation (dominant candle colors + transparency) to separate bodies from wicks. Support common TradingView themes (light/dark) and customizable colors.
+* For each candlestick column (identified via vertical projection/profile), compute:
+
+  * Body top/bottom pixel positions → open & close (order depends on up/down candle)
+  * Wick top (max) and wick bottom (min) pixel positions → high & low
+* If candles are hollow/outline-only, use contour/edge detection to recover body positions.
+
+## 6 — Timestamp mapping
+
+* Prefer OCR reading of x-axis labels. If missing or clipped, fall back to user-supplied timeframe (e.g., 1m, 5m, 1h) + first/last visible timestamp via OCR or interactive click.
+* Map each candle index to a timestamp using consistent spacing; validate by checking readable tick labels.
+
+## 7 — Output formats & metadata
+
+* Export JSON/CSV with fields: `timestamp_ISO`, `open`, `high`, `low`, `close`, `source_image_hash`, `pixel_coords`, `confidence` (0–1), `notes`.
+* Include `confidence` computed from: axis calibration confidence, OCR confidence, pixel-segmentation confidence.
+
+## 8 — Accuracy & QA
+
+* Add unit tests using synthetic charts (rendered from known OHLC arrays) to assert recovered OHLC equals ground truth within tolerance.
+* Include an evaluation script that runs on N test images and produces RMSE, MAE, and percentile error breakdowns.
+
+## 9 — Code quality
+
+* Use ESLint + Prettier config, TypeScript `strict` on. Provide clear function-level JSDoc comments.
+* Commit often with descriptive messages; each merge contains tests and a short changelog entry.
+
+## 10 — Performance & deployment
+
+* Provide Node CLI and optional browser build (WASM/OpenCV.js + Tesseract.js). Keep core logic shareable.
+* Optimize heavy image ops using WebAssembly (OpenCV.js) or native bindings (opencv4nodejs) in Node if available.
+
+## 11 — Security & privacy
+
+* Do not upload user screenshots to third-party services by default. If using cloud OCR/vision, obtain explicit user consent and log which images were sent and to which provider.
+
+## 12 — Fallback & manual mode
+
+* Always provide a manual interactive mode where the user can click:
+
+  * 3 points to define chart bounding box
+  * 2 y-axis numeric labels (click on label numerals)
+  * 2 x-axis ticks or one timestamp + timeframe
+* Manual labels override automatic detection.
+
+## 13 — Logging & reproducibility
+
+* Save processing logs and intermediate images for each run (deskewed image, segmentation masks, detected contours). Include a reproducible run ID.
+
+## 14 — Acceptance criteria for each milestone
+
+* M0 (PoC): Extract candle bodies and wicks for synthetic charts with RMSE < 0.2%.
+* M1 (Real images): Work on TradingView screenshots with manual calibration available; 0.5% median error.
+* M2 (Automated): Add OCR axis detection and automated calibration; provide 95% success on a test suite of 100 real screenshots.
+
+---
+
+End of rules.mdc
+# Agent Rules (rules.mdc)
+
+These rules are the directives the Cursor agent must follow while implementing the candlestick-image→OHLC extractor. Save this file as `rules.mdc` and load it into the agent's workspace before coding.
+
+## 1 — General goals
+
+* Produce an automated pipeline that converts a screenshot of a TradingView NASDAQ candlestick chart into exact OHLC (open, high, low, close) values per candle and timestamps when available.
+* Prioritize accuracy first, then performance. Aim for pixel-to-price mapping error ≤ 0.1% for standard-resolution screenshots; document cases where this may fail.
+* All code must be TypeScript (Node + optional browser module), strongly typed, with unit tests for core algorithms.
+
+## 2 — Input assumptions & validation
+
+* Accept image inputs (PNG/JPEG/WebP). Detect device pixel ratio (retina) metadata when available and adjust.
+* If axis calibration is ambiguous, require one of the following fallback inputs: (a) two clicked calibration points from the user, or (b) detected numeric axis labels via OCR.
+* Reject or flag images with >10° rotation unless user agrees to manual deskew calibration.
+
+## 3 — Preprocessing rules
+
+* Run automatic deskew (Hough-line or edge-based) with tolerance ±5°. If confidence low, request manual corner clicks.
+* Convert to a lossless working format (RGBA) and maintain original DPI metadata.
+* Apply adaptive contrast and denoising before edge/color segmentation.
+
+## 4 — Axis detection & calibration
+
+* Try OCR (Tesseract.js) to read price labels on the y-axis and timestamps/x-axis. If OCR confidence <70% for labels, switch to interactive calibration (agent will prompt the user to click two y-axis values and two x-axis time markers).
+* Detect linear vs logarithmic scale; prefer linear unless log label found (e.g., exponential notation, 'log', or axis tick spacing suggests log).
+
+## 5 — Candle detection rules
+
+* Use color-based segmentation (dominant candle colors + transparency) to separate bodies from wicks. Support common TradingView themes (light/dark) and customizable colors.
+* For each candlestick column (identified via vertical projection/profile), compute:
+
+  * Body top/bottom pixel positions → open & close (order depends on up/down candle)
+  * Wick top (max) and wick bottom (min) pixel positions → high & low
+* If candles are hollow/outline-only, use contour/edge detection to recover body positions.
+
+## 6 — Timestamp mapping
+
+* Prefer OCR reading of x-axis labels. If missing or clipped, fall back to user-supplied timeframe (e.g., 1m, 5m, 1h) + first/last visible timestamp via OCR or interactive click.
+* Map each candle index to a timestamp using consistent spacing; validate by checking readable tick labels.
+
+## 7 — Output formats & metadata
+
+* Export JSON/CSV with fields: `timestamp_ISO`, `open`, `high`, `low`, `close`, `source_image_hash`, `pixel_coords`, `confidence` (0–1), `notes`.
+* Include `confidence` computed from: axis calibration confidence, OCR confidence, pixel-segmentation confidence.
+
+## 8 — Accuracy & QA
+
+* Add unit tests using synthetic charts (rendered from known OHLC arrays) to assert recovered OHLC equals ground truth within tolerance.
+* Include an evaluation script that runs on N test images and produces RMSE, MAE, and percentile error breakdowns.
+
+## 9 — Code quality
+
+* Use ESLint + Prettier config, TypeScript `strict` on. Provide clear function-level JSDoc comments.
+* Commit often with descriptive messages; each merge contains tests and a short changelog entry.
+
+## 10 — Performance & deployment
+
+* Provide Node CLI and optional browser build (WASM/OpenCV.js + Tesseract.js). Keep core logic shareable.
+* Optimize heavy image ops using WebAssembly (OpenCV.js) or native bindings (opencv4nodejs) in Node if available.
+
+## 11 — Security & privacy
+
+* Do not upload user screenshots to third-party services by default. If using cloud OCR/vision, obtain explicit user consent and log which images were sent and to which provider.
+
+## 12 — Fallback & manual mode
+
+* Always provide a manual interactive mode where the user can click:
+
+  * 3 points to define chart bounding box
+  * 2 y-axis numeric labels (click on label numerals)
+  * 2 x-axis ticks or one timestamp + timeframe
+* Manual labels override automatic detection.
+
+## 13 — Logging & reproducibility
+
+* Save processing logs and intermediate images for each run (deskewed image, segmentation masks, detected contours). Include a reproducible run ID.
+
+## 14 — Acceptance criteria for each milestone
+
+* M0 (PoC): Extract candle bodies and wicks for synthetic charts with RMSE < 0.2%.
+* M1 (Real images): Work on TradingView screenshots with manual calibration available; 0.5% median error.
+* M2 (Automated): Add OCR axis detection and automated calibration; provide 95% success on a test suite of 100 real screenshots.
+
+---
+
+End of rules.mdc
