@@ -173,3 +173,40 @@ export interface YMappingResult {
   minPixelY: number;
   maxPixelY: number;
 }
+
+export interface RGBColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface CandleColorCluster {
+  color: RGBColor;
+  count: number;
+  confidence: number;
+  type: 'bullish_fill' | 'bearish_fill' | 'bullish_stroke' | 'bearish_stroke' | 'wick' | 'background';
+}
+
+export interface CandleColorDetectionResult {
+  bullishFill: RGBColor | null;
+  bearishFill: RGBColor | null;
+  bullishStroke: RGBColor | null;
+  bearishStroke: RGBColor | null;
+  wickColor: RGBColor | null;
+  backgroundColor: RGBColor | null;
+  overallConfidence: number;
+  clusters: CandleColorCluster[];
+  method: 'kmeans' | 'histogram' | 'hybrid';
+}
+
+export interface KMeansParameters {
+  k?: number; // Number of clusters (default: 6)
+  maxIterations?: number; // Maximum iterations (default: 100)
+  tolerance?: number; // Convergence tolerance (default: 0.001)
+}
+
+export interface HistogramAnalysisParameters {
+  binSize?: number; // Histogram bin size (default: 16)
+  minFrequency?: number; // Minimum frequency threshold (default: 0.01)
+  colorSpace?: 'rgb' | 'hsv' | 'lab'; // Color space for analysis (default: 'rgb')
+}

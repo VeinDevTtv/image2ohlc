@@ -14,6 +14,11 @@ import {
   BoundingBox,
   XAxisCalibrationOptions,
   YMappingResult,
+  RGBColor,
+  CandleColorCluster,
+  CandleColorDetectionResult,
+  KMeansParameters,
+  HistogramAnalysisParameters,
 } from '../common/types';
 
 /**
@@ -45,7 +50,7 @@ interface MockMat {
   rows: number;
   cols: number;
   empty(): boolean;
-  cvtColor(code: number): MockMat;
+  cvtColor(code: number | string): MockMat;
   splitChannels(): MockMat[];
   canny(threshold1: number, threshold2: number): MockMat;
   bilateralFilter(d: number, sigmaColor: number, sigmaSpace: number): MockMat;
@@ -55,6 +60,7 @@ interface MockMat {
   clone(): MockMat;
   delete(): void;
   warpAffine(M: number[], dsize: { width: number; height: number }, flags: number, borderMode: number, borderValue: { b: number; g: number; r: number }): MockMat;
+  getData(): Uint8Array;
 }
 
 /**
@@ -157,7 +163,7 @@ class MockMatImpl implements MockMat {
     return this.rows === 0 || this.cols === 0;
   }
 
-  cvtColor(_code: number): MockMat {
+  cvtColor(_code: number | string): MockMat {
     // Mock implementation - return clone
     return this.clone();
   }
@@ -206,6 +212,15 @@ class MockMatImpl implements MockMat {
   warpAffine(_M: number[], _dsize: { width: number; height: number }, _flags: number, _borderMode: number, _borderValue: { b: number; g: number; r: number }): MockMat {
     // Mock implementation - return clone
     return this.clone();
+  }
+
+  getData(): Uint8Array {
+    // Return image data as Uint8Array
+    if (this.imageBuffer) {
+      return new Uint8Array(this.imageBuffer);
+    }
+    // Return empty array if no image buffer
+    return new Uint8Array(this.rows * this.cols * 4); // RGBA format
   }
 }
 
@@ -1314,5 +1329,509 @@ export class ImagePreprocessor {
     // Penalty increases with gap size relative to average
     const gapRatio = maxGap / avgGap;
     return Math.min(0.3, Math.max(0, (gapRatio - 1.5) * 0.1));
+  }
+
+  /**
+   * Performs k-means clustering on RGB color data
+   * @param colors - Array of RGB colors to cluster
+   * @param k - Number of clusters
+   * @param maxIterations - Maximum number of iterations
+   * @param tolerance - Convergence tolerance
+   * @returns Array of cluster centroids and their assignments
+   */
+  private performKMeansClustering(
+    colors: RGBColor[],
+    k: number = 6,
+    maxIterations: number = 100,
+    tolerance: number = 0.001
+  ): { centroids: RGBColor[]; assignments: number[]; counts: number[] } {
+    if (colors.length === 0 || k <= 0) {
+      return { centroids: [], assignments: [], counts: [] };
+    }
+
+    // Initialize centroids randomly
+    const centroids: RGBColor[] = [];
+    for (let i = 0; i < k; i++) {
+      const randomIndex = Math.floor(Math.random() * colors.length);
+      centroids.push({ ...colors[randomIndex]! });
+    }
+
+    const assignments = new Array(colors.length).fill(0);
+    const counts = new Array(k).fill(0);
+    let iteration = 0;
+    let converged = false;
+
+    while (iteration < maxIterations && !converged) {
+      // Assign each color to the nearest centroid
+      for (let i = 0; i < colors.length; i++) {
+        let minDistance = Infinity;
+        let closestCentroid = 0;
+
+        for (let j = 0; j < k; j++) {
+          const distance = this.calculateColorDistance(colors[i]!, centroids[j]!);
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestCentroid = j;
+          }
+        }
+
+        assignments[i] = closestCentroid;
+      }
+
+      // Update centroids
+      const newCentroids: RGBColor[] = [];
+      const newCounts = new Array(k).fill(0);
+
+      for (let i = 0; i < k; i++) {
+        let rSum = 0, gSum = 0, bSum = 0;
+        let count = 0;
+
+        for (let j = 0; j < colors.length; j++) {
+          if (assignments[j] === i) {
+            rSum += colors[j]!.r;
+            gSum += colors[j]!.g;
+            bSum += colors[j]!.b;
+            count++;
+          }
+        }
+
+        if (count > 0) {
+          newCentroids.push({
+            r: Math.round(rSum / count),
+            g: Math.round(gSum / count),
+            b: Math.round(bSum / count)
+          });
+          newCounts[i] = count;
+        } else {
+          // Keep old centroid if no points assigned
+          newCentroids.push({ ...centroids[i]! });
+          newCounts[i] = 0;
+        }
+      }
+
+      // Check for convergence
+      converged = true;
+      for (let i = 0; i < k; i++) {
+        const distance = this.calculateColorDistance(centroids[i]!, newCentroids[i]!);
+        if (distance > tolerance) {
+          converged = false;
+          break;
+        }
+      }
+
+      centroids.splice(0, centroids.length, ...newCentroids);
+      counts.splice(0, counts.length, ...newCounts);
+      iteration++;
+    }
+
+    return { centroids, assignments, counts };
+  }
+
+  /**
+   * Calculates Euclidean distance between two RGB colors
+   * @param color1 - First RGB color
+   * @param color2 - Second RGB color
+   * @returns Distance value
+   */
+  private calculateColorDistance(color1: RGBColor, color2: RGBColor): number {
+    const dr = color1.r - color2.r;
+    const dg = color1.g - color2.g;
+    const db = color1.b - color2.b;
+    return Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+
+  /**
+   * Analyzes RGB histogram to identify dominant colors
+   * @param imageData - Image data as Uint8Array
+   * @param binSize - Histogram bin size
+   * @param minFrequency - Minimum frequency threshold
+   * @returns Array of dominant colors with their frequencies
+   */
+  private analyzeRGBHistogram(
+    imageData: Uint8Array,
+    binSize: number = 16,
+    minFrequency: number = 0.01
+  ): Array<{ color: RGBColor; frequency: number; count: number }> {
+    const histogram = new Map<string, number>();
+    const totalPixels = imageData.length / 4; // RGBA format
+
+    // Build histogram
+    for (let i = 0; i < imageData.length; i += 4) {
+      const r = Math.floor(imageData[i]! / binSize) * binSize;
+      const g = Math.floor(imageData[i + 1]! / binSize) * binSize;
+      const b = Math.floor(imageData[i + 2]! / binSize) * binSize;
+      
+      const key = `${r},${g},${b}`;
+      histogram.set(key, (histogram.get(key) || 0) + 1);
+    }
+
+    // Convert to array and filter by minimum frequency
+    const dominantColors: Array<{ color: RGBColor; frequency: number; count: number }> = [];
+    
+    for (const [key, count] of histogram.entries()) {
+      const frequency = count / totalPixels;
+      if (frequency >= minFrequency) {
+        const [r, g, b] = key.split(',').map(Number);
+        dominantColors.push({
+          color: { r: r!, g: g!, b: b! },
+          frequency,
+          count
+        });
+      }
+    }
+
+    // Sort by frequency (descending)
+    return dominantColors.sort((a, b) => b.frequency - a.frequency);
+  }
+
+  /**
+   * Classifies candle colors based on RGB values and trading conventions
+   * @param color - RGB color to classify
+   * @returns Probable candle color type
+   */
+  private classifyCandleColor(color: RGBColor): {
+    type: CandleColorCluster['type'];
+    confidence: number;
+  } {
+    const { r, g, b } = color;
+    
+    // Calculate brightness and saturation
+    const brightness = (r + g + b) / 3;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const saturation = max === 0 ? 0 : (max - min) / max;
+    
+    // Common TradingView color schemes
+    const isGreen = g > r && g > b && g - r > 30 && g - b > 30;
+    const isRed = r > g && r > b && r - g > 30 && r - b > 30;
+    const isBlue = b > r && b > g && b - r > 30 && b - g > 30;
+    const isDark = brightness < 80;
+    const isLight = brightness > 200;
+    const isGray = saturation < 0.1;
+    
+    // Classification logic
+    if (isGray) {
+      return { type: 'background', confidence: 0.8 };
+    }
+    
+    if (isGreen) {
+      if (isDark) {
+        return { type: 'bullish_fill', confidence: 0.9 };
+      } else if (isLight) {
+        return { type: 'bullish_stroke', confidence: 0.7 };
+      } else {
+        return { type: 'bullish_fill', confidence: 0.6 };
+      }
+    }
+    
+    if (isRed) {
+      if (isDark) {
+        return { type: 'bearish_fill', confidence: 0.9 };
+      } else if (isLight) {
+        return { type: 'bearish_stroke', confidence: 0.7 };
+      } else {
+        return { type: 'bearish_fill', confidence: 0.6 };
+      }
+    }
+    
+    if (isBlue || (brightness > 100 && brightness < 150)) {
+      return { type: 'wick', confidence: 0.7 };
+    }
+    
+    // Default classification
+    if (brightness < 100) {
+      return { type: 'background', confidence: 0.5 };
+    }
+    
+    return { type: 'wick', confidence: 0.3 };
+  }
+
+  /**
+   * Detects probable candle colors using k-means clustering and histogram analysis
+   * @param bboxImage - Bounding box image containing candlesticks
+   * @param kMeansParams - K-means clustering parameters
+   * @param histogramParams - Histogram analysis parameters
+   * @returns Candle color detection result with confidence scores
+   */
+  public async detectCandleColors(
+    bboxImage: MockMat,
+    kMeansParams: KMeansParameters = {},
+    histogramParams: HistogramAnalysisParameters = {}
+  ): Promise<CandleColorDetectionResult> {
+    const {
+      k = 6,
+      maxIterations = 100,
+      tolerance = 0.001
+    } = kMeansParams;
+
+    const {
+      binSize = 16,
+      minFrequency = 0.01
+    } = histogramParams;
+
+    try {
+      // Convert image to RGB data
+      const imageData = await this.convertToRGBData(bboxImage);
+      if (!imageData) {
+        throw new Error('Failed to convert image to RGB data');
+      }
+
+      // Extract unique colors for k-means clustering
+      const uniqueColors = this.extractUniqueColors(imageData, binSize);
+      
+      // Perform k-means clustering
+      const { centroids, counts } = this.performKMeansClustering(
+        uniqueColors,
+        k,
+        maxIterations,
+        tolerance
+      );
+
+      // Analyze histogram for additional color information
+      const histogramColors = this.analyzeRGBHistogram(
+        imageData,
+        binSize,
+        minFrequency
+      );
+
+      // Combine k-means and histogram results
+      const allClusters: CandleColorCluster[] = [];
+      
+      // Add k-means clusters
+      for (let i = 0; i < centroids.length; i++) {
+        const classification = this.classifyCandleColor(centroids[i]!);
+        allClusters.push({
+          color: centroids[i]!,
+          count: counts[i]!,
+          confidence: classification.confidence,
+          type: classification.type
+        });
+      }
+
+      // Add histogram clusters
+      for (const histColor of histogramColors) {
+        const classification = this.classifyCandleColor(histColor.color);
+        allClusters.push({
+          color: histColor.color,
+          count: histColor.count,
+          confidence: classification.confidence * histColor.frequency,
+          type: classification.type
+        });
+      }
+
+      // Deduplicate and merge similar colors
+      const mergedClusters = this.mergeSimilarColorClusters(allClusters);
+
+      // Extract specific candle colors
+      const result = this.extractCandleColorsFromClusters(mergedClusters);
+
+      // Calculate overall confidence
+      const overallConfidence = this.calculateOverallConfidence(mergedClusters);
+
+      return {
+        ...result,
+        overallConfidence,
+        clusters: mergedClusters,
+        method: 'hybrid'
+      };
+
+    } catch (error) {
+      console.error('Error in detectCandleColors:', error);
+      return {
+        bullishFill: null,
+        bearishFill: null,
+        bullishStroke: null,
+        bearishStroke: null,
+        wickColor: null,
+        backgroundColor: null,
+        overallConfidence: 0,
+        clusters: [],
+        method: 'hybrid'
+      };
+    }
+  }
+
+  /**
+   * Converts MockMat image to RGB data array
+   * @param image - Input image
+   * @returns RGB data as Uint8Array or null if conversion fails
+   */
+  private async convertToRGBData(image: MockMat): Promise<Uint8Array | null> {
+    try {
+      // Convert to RGB format
+      const rgbImage = await image.cvtColor('COLOR_BGR2RGB');
+      
+      // Get image data
+      const imageData = rgbImage.getData();
+      
+      return imageData;
+    } catch (error) {
+      console.error('Error converting image to RGB data:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Extracts unique colors from image data
+   * @param imageData - RGB image data
+   * @param binSize - Color binning size
+   * @returns Array of unique RGB colors
+   */
+  private extractUniqueColors(imageData: Uint8Array, binSize: number): RGBColor[] {
+    const colorSet = new Set<string>();
+    const colors: RGBColor[] = [];
+
+    for (let i = 0; i < imageData.length; i += 4) {
+      const r = Math.floor(imageData[i]! / binSize) * binSize;
+      const g = Math.floor(imageData[i + 1]! / binSize) * binSize;
+      const b = Math.floor(imageData[i + 2]! / binSize) * binSize;
+      
+      const key = `${r},${g},${b}`;
+      if (!colorSet.has(key)) {
+        colorSet.add(key);
+        colors.push({ r, g, b });
+      }
+    }
+
+    return colors;
+  }
+
+  /**
+   * Merges similar color clusters to reduce redundancy
+   * @param clusters - Array of color clusters
+   * @returns Merged clusters array
+   */
+  private mergeSimilarColorClusters(clusters: CandleColorCluster[]): CandleColorCluster[] {
+    const merged: CandleColorCluster[] = [];
+    const used = new Set<number>();
+
+    for (let i = 0; i < clusters.length; i++) {
+      if (used.has(i)) continue;
+
+      const cluster = clusters[i]!;
+      const similarClusters: CandleColorCluster[] = [cluster];
+
+      // Find similar clusters
+      for (let j = i + 1; j < clusters.length; j++) {
+        if (used.has(j)) continue;
+
+        const otherCluster = clusters[j]!;
+        const distance = this.calculateColorDistance(cluster.color, otherCluster.color);
+        
+        // Merge if colors are similar (distance < 30) and same type
+        if (distance < 30 && cluster.type === otherCluster.type) {
+          similarClusters.push(otherCluster);
+          used.add(j);
+        }
+      }
+
+      // Merge similar clusters
+      if (similarClusters.length > 1) {
+        let totalCount = 0;
+        let weightedR = 0, weightedG = 0, weightedB = 0;
+        let maxConfidence = 0;
+
+        for (const similarCluster of similarClusters) {
+          totalCount += similarCluster.count;
+          weightedR += similarCluster.color.r * similarCluster.count;
+          weightedG += similarCluster.color.g * similarCluster.count;
+          weightedB += similarCluster.color.b * similarCluster.count;
+          maxConfidence = Math.max(maxConfidence, similarCluster.confidence);
+        }
+
+        merged.push({
+          color: {
+            r: Math.round(weightedR / totalCount),
+            g: Math.round(weightedG / totalCount),
+            b: Math.round(weightedB / totalCount)
+          },
+          count: totalCount,
+          confidence: maxConfidence,
+          type: cluster.type
+        });
+      } else {
+        merged.push(cluster);
+      }
+
+      used.add(i);
+    }
+
+    return merged;
+  }
+
+  /**
+   * Extracts specific candle colors from clusters
+   * @param clusters - Array of color clusters
+   * @returns Object with specific candle colors
+   */
+  private extractCandleColorsFromClusters(clusters: CandleColorCluster[]): {
+    bullishFill: RGBColor | null;
+    bearishFill: RGBColor | null;
+    bullishStroke: RGBColor | null;
+    bearishStroke: RGBColor | null;
+    wickColor: RGBColor | null;
+    backgroundColor: RGBColor | null;
+  } {
+    const result = {
+      bullishFill: null as RGBColor | null,
+      bearishFill: null as RGBColor | null,
+      bullishStroke: null as RGBColor | null,
+      bearishStroke: null as RGBColor | null,
+      wickColor: null as RGBColor | null,
+      backgroundColor: null as RGBColor | null
+    };
+
+    // Sort clusters by confidence and count
+    const sortedClusters = clusters.sort((a, b) => 
+      (b.confidence * b.count) - (a.confidence * a.count)
+    );
+
+    for (const cluster of sortedClusters) {
+      switch (cluster.type) {
+        case 'bullish_fill':
+          if (!result.bullishFill) result.bullishFill = cluster.color;
+          break;
+        case 'bearish_fill':
+          if (!result.bearishFill) result.bearishFill = cluster.color;
+          break;
+        case 'bullish_stroke':
+          if (!result.bullishStroke) result.bullishStroke = cluster.color;
+          break;
+        case 'bearish_stroke':
+          if (!result.bearishStroke) result.bearishStroke = cluster.color;
+          break;
+        case 'wick':
+          if (!result.wickColor) result.wickColor = cluster.color;
+          break;
+        case 'background':
+          if (!result.backgroundColor) result.backgroundColor = cluster.color;
+          break;
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Calculates overall confidence for color detection
+   * @param clusters - Array of color clusters
+   * @returns Overall confidence score (0-1)
+   */
+  private calculateOverallConfidence(clusters: CandleColorCluster[]): number {
+    if (clusters.length === 0) return 0;
+
+    const typeCounts = new Map<string, number>();
+    let totalConfidence = 0;
+
+    for (const cluster of clusters) {
+      typeCounts.set(cluster.type, (typeCounts.get(cluster.type) || 0) + 1);
+      totalConfidence += cluster.confidence;
+    }
+
+    const avgConfidence = totalConfidence / clusters.length;
+    const typeDiversity = Math.min(typeCounts.size / 6, 1); // Max 6 types
+    const coverageScore = Math.min(clusters.length / 6, 1); // Ideal: 6 clusters
+
+    return (avgConfidence * 0.5 + typeDiversity * 0.3 + coverageScore * 0.2);
   }
 }
