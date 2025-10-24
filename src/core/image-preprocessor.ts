@@ -19,6 +19,8 @@ import {
   CandleColorDetectionResult,
   KMeansParameters,
   HistogramAnalysisParameters,
+  CandleColumn,
+  CandleSegmentationResult,
 } from '../common/types';
 
 /**
@@ -1817,6 +1819,367 @@ export class ImagePreprocessor {
    * @param clusters - Array of color clusters
    * @returns Overall confidence score (0-1)
    */
+  /**
+   * Segments candles from the image using color-based masks and finds connected components per column
+   * @param image - Preprocessed image (MockMat)
+   * @param colors - Detected candle colors for segmentation
+   * @returns Promise<CandleSegmentationResult> - Bounding boxes and masks for each candle column
+   */
+  public async segmentCandles(
+    image: MockMat,
+    colors: CandleColorDetectionResult
+  ): Promise<CandleSegmentationResult> {
+    this.logStep('segment_candles', 'success', 'Starting candle segmentation');
+    
+    try {
+      // Create color-based masks for bodies and wicks
+      const bodyMask = await this.createBodyMask(image, colors);
+      const wickMask = await this.createWickMask(image, colors);
+      
+      // Save mask images for debugging
+      const maskPaths = await this.saveCandleMasks(bodyMask, wickMask);
+      
+      // Find connected components per column
+      const candleColumns = await this.findCandleColumns(bodyMask, wickMask);
+      
+      // Generate bounding boxes for each candle column
+      const boundingBoxes = this.generateCandleBoundingBoxes(candleColumns);
+      
+      this.logStep('segment_candles', 'success', `Found ${boundingBoxes.length} candle columns`);
+      
+      return {
+        boundingBoxes,
+        maskPaths,
+        candleColumns,
+        confidence: this.calculateSegmentationConfidence(boundingBoxes, candleColumns)
+      };
+      
+    } catch (error) {
+      this.logStep('segment_candles', 'error', `Candle segmentation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Creates a mask for candle bodies using detected colors
+   * @param image - Input image
+   * @param colors - Detected candle colors
+   * @returns Promise<MockMat> - Body mask
+   */
+  private async createBodyMask(image: MockMat, colors: CandleColorDetectionResult): Promise<MockMat> {
+    const imageData = image.getData();
+    const mask = new MockMatImpl(image.rows, image.cols);
+    const maskData = mask.getData();
+    
+    const tolerance = 30; // Color tolerance for segmentation
+    
+    for (let i = 0; i < imageData.length; i += 3) {
+      const pixelIndex = i / 3;
+      const b = imageData[i]!;
+      const g = imageData[i + 1]!;
+      const r = imageData[i + 2]!;
+      
+      // Check if pixel matches bullish or bearish body colors
+      const isBullishBody = colors.bullishFill && this.isColorMatch({ r, g, b }, colors.bullishFill, tolerance);
+      const isBearishBody = colors.bearishFill && this.isColorMatch({ r, g, b }, colors.bearishFill, tolerance);
+      
+      if (isBullishBody || isBearishBody) {
+        maskData[pixelIndex * 3] = 255;     // B
+        maskData[pixelIndex * 3 + 1] = 255; // G
+        maskData[pixelIndex * 3 + 2] = 255; // R
+      }
+    }
+    
+    return mask;
+  }
+
+  /**
+   * Creates a mask for candle wicks using detected colors
+   * @param image - Input image
+   * @param colors - Detected candle colors
+   * @returns Promise<MockMat> - Wick mask
+   */
+  private async createWickMask(image: MockMat, colors: CandleColorDetectionResult): Promise<MockMat> {
+    const imageData = image.getData();
+    const mask = new MockMatImpl(image.rows, image.cols);
+    const maskData = mask.getData();
+    
+    const tolerance = 30; // Color tolerance for segmentation
+    
+    for (let i = 0; i < imageData.length; i += 3) {
+      const pixelIndex = i / 3;
+      const b = imageData[i]!;
+      const g = imageData[i + 1]!;
+      const r = imageData[i + 2]!;
+      
+      // Check if pixel matches wick color
+      const isWick = colors.wickColor && this.isColorMatch({ r, g, b }, colors.wickColor, tolerance);
+      
+      if (isWick) {
+        maskData[pixelIndex * 3] = 255;     // B
+        maskData[pixelIndex * 3 + 1] = 255; // G
+        maskData[pixelIndex * 3 + 2] = 255; // R
+      }
+    }
+    
+    return mask;
+  }
+
+  /**
+   * Checks if two colors match within tolerance
+   * @param color1 - First color
+   * @param color2 - Second color
+   * @param tolerance - Color difference tolerance
+   * @returns boolean - True if colors match
+   */
+  private isColorMatch(color1: RGBColor, color2: RGBColor, tolerance: number): boolean {
+    const deltaR = Math.abs(color1.r - color2.r);
+    const deltaG = Math.abs(color1.g - color2.g);
+    const deltaB = Math.abs(color1.b - color2.b);
+    
+    return deltaR <= tolerance && deltaG <= tolerance && deltaB <= tolerance;
+  }
+
+  /**
+   * Finds candle columns by analyzing vertical projections and connected components
+   * @param bodyMask - Body mask
+   * @param wickMask - Wick mask
+   * @returns Promise<CandleColumn[]> - Array of candle column data
+   */
+  private async findCandleColumns(bodyMask: MockMat, wickMask: MockMat): Promise<CandleColumn[]> {
+    const bodyData = bodyMask.getData();
+    const wickData = wickMask.getData();
+    const width = bodyMask.cols;
+    const height = bodyMask.rows;
+    
+    // Calculate vertical projection to find potential candle columns
+    const verticalProjection = new Array(width).fill(0);
+    
+    for (let x = 0; x < width; x++) {
+      for (let y = 0; y < height; y++) {
+        const pixelIndex = y * width + x;
+        const bodyPixel = bodyData[pixelIndex * 3]!; // Check if body pixel is white (255)
+        const wickPixel = wickData[pixelIndex * 3]!; // Check if wick pixel is white (255)
+        
+        if (bodyPixel > 128 || wickPixel > 128) {
+          verticalProjection[x]!++;
+        }
+      }
+    }
+    
+    // Find peaks in vertical projection (potential candle columns)
+    const candleColumns: CandleColumn[] = [];
+    const minColumnWidth = 3; // Minimum width for a candle column
+    const minColumnHeight = 10; // Minimum height for a candle column
+    
+    let inColumn = false;
+    let columnStart = 0;
+    
+    for (let x = 0; x < width; x++) {
+      const projection = verticalProjection[x]!;
+      
+      if (projection > minColumnHeight && !inColumn) {
+        // Start of a new column
+        inColumn = true;
+        columnStart = x;
+      } else if (projection <= minColumnHeight && inColumn) {
+        // End of current column
+        const columnWidth = x - columnStart;
+        if (columnWidth >= minColumnWidth) {
+          const column = await this.analyzeCandleColumn(
+            bodyMask, 
+            wickMask, 
+            columnStart, 
+            columnWidth, 
+            height
+          );
+          if (column) {
+            candleColumns.push(column);
+          }
+        }
+        inColumn = false;
+      }
+    }
+    
+    // Handle case where last column extends to image edge
+    if (inColumn) {
+      const columnWidth = width - columnStart;
+      if (columnWidth >= minColumnWidth) {
+        const column = await this.analyzeCandleColumn(
+          bodyMask, 
+          wickMask, 
+          columnStart, 
+          columnWidth, 
+          height
+        );
+        if (column) {
+          candleColumns.push(column);
+        }
+      }
+    }
+    
+    return candleColumns;
+  }
+
+  /**
+   * Analyzes a specific candle column to extract body and wick information
+   * @param bodyMask - Body mask
+   * @param wickMask - Wick mask
+   * @param startX - Column start X position
+   * @param width - Column width
+   * @param height - Image height
+   * @returns Promise<CandleColumn | null> - Analyzed candle column data
+   */
+  private async analyzeCandleColumn(
+    bodyMask: MockMat,
+    wickMask: MockMat,
+    startX: number,
+    width: number,
+    height: number
+  ): Promise<CandleColumn | null> {
+    const bodyData = bodyMask.getData();
+    const wickData = wickMask.getData();
+    
+    let minY = height;
+    let maxY = 0;
+    let bodyTop = height;
+    let bodyBottom = 0;
+    let hasBody = false;
+    
+    // Scan the column to find body and wick extents
+    for (let x = startX; x < startX + width; x++) {
+      for (let y = 0; y < height; y++) {
+        const pixelIndex = y * width + x;
+        const bodyPixel = bodyData[pixelIndex * 3]!;
+        const wickPixel = wickData[pixelIndex * 3]!;
+        
+        if (bodyPixel > 128) {
+          hasBody = true;
+          bodyTop = Math.min(bodyTop, y);
+          bodyBottom = Math.max(bodyBottom, y);
+        }
+        
+        if (bodyPixel > 128 || wickPixel > 128) {
+          minY = Math.min(minY, y);
+          maxY = Math.max(maxY, y);
+        }
+      }
+    }
+    
+    // Only return column if it has meaningful content
+    if (maxY - minY < 5) {
+      return null;
+    }
+    
+    return {
+      x: startX,
+      y: minY,
+      width: width,
+      height: maxY - minY,
+      bodyTop: hasBody ? bodyTop : minY,
+      bodyBottom: hasBody ? bodyBottom : maxY,
+      wickTop: minY,
+      wickBottom: maxY,
+      hasBody: hasBody,
+      confidence: hasBody ? 0.9 : 0.6 // Higher confidence for columns with bodies
+    };
+  }
+
+  /**
+   * Generates bounding boxes for candle columns
+   * @param candleColumns - Array of candle column data
+   * @returns BoundingBox[] - Array of bounding boxes
+   */
+  private generateCandleBoundingBoxes(candleColumns: CandleColumn[]): BoundingBox[] {
+    return candleColumns.map(column => ({
+      x: column.x,
+      y: column.y,
+      width: column.width,
+      height: column.height
+    }));
+  }
+
+  /**
+   * Saves candle mask images for debugging
+   * @param bodyMask - Body mask
+   * @param wickMask - Wick mask
+   * @returns Promise<string[]> - Paths to saved mask images
+   */
+  private async saveCandleMasks(bodyMask: MockMat, wickMask: MockMat): Promise<string[]> {
+    const maskPaths: string[] = [];
+    
+    try {
+      // Save body mask
+      const bodyPath = await this.saveImage(bodyMask, 'candle_body_mask.png');
+      maskPaths.push(bodyPath);
+      
+      // Save wick mask
+      const wickPath = await this.saveImage(wickMask, 'candle_wick_mask.png');
+      maskPaths.push(wickPath);
+      
+      // Create combined mask for visualization
+      const combinedMask = this.createCombinedMask(bodyMask, wickMask);
+      const combinedPath = await this.saveImage(combinedMask, 'candle_combined_mask.png');
+      maskPaths.push(combinedPath);
+      
+      // Clean up
+      combinedMask.delete();
+      
+    } catch (error) {
+      this.logStep('save_candle_masks', 'warning', `Failed to save some candle masks: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+    
+    return maskPaths;
+  }
+
+  /**
+   * Creates a combined mask showing both bodies and wicks in different colors
+   * @param bodyMask - Body mask
+   * @param wickMask - Wick mask
+   * @returns MockMat - Combined mask
+   */
+  private createCombinedMask(bodyMask: MockMat, wickMask: MockMat): MockMat {
+    const bodyData = bodyMask.getData();
+    const wickData = wickMask.getData();
+    const combined = new MockMatImpl(bodyMask.rows, bodyMask.cols);
+    const combinedData = combined.getData();
+    
+    for (let i = 0; i < bodyData.length; i += 3) {
+      const bodyPixel = bodyData[i]!;
+      const wickPixel = wickData[i]!;
+      
+      if (bodyPixel > 128) {
+        // Body pixels in red
+        combinedData[i] = 0;     // B
+        combinedData[i + 1] = 0; // G
+        combinedData[i + 2] = 255; // R
+      } else if (wickPixel > 128) {
+        // Wick pixels in blue
+        combinedData[i] = 255;   // B
+        combinedData[i + 1] = 0; // G
+        combinedData[i + 2] = 0; // R
+      }
+    }
+    
+    return combined;
+  }
+
+  /**
+   * Calculates confidence score for candle segmentation
+   * @param boundingBoxes - Generated bounding boxes
+   * @param candleColumns - Analyzed candle columns
+   * @returns number - Confidence score between 0 and 1
+   */
+  private calculateSegmentationConfidence(boundingBoxes: BoundingBox[], candleColumns: CandleColumn[]): number {
+    if (boundingBoxes.length === 0) return 0;
+    
+    const avgColumnConfidence = candleColumns.reduce((sum, col) => sum + col.confidence, 0) / candleColumns.length;
+    const columnCountScore = Math.min(boundingBoxes.length / 20, 1); // Expect around 20 candles max
+    const bodyDetectionScore = candleColumns.filter(col => col.hasBody).length / candleColumns.length;
+    
+    return (avgColumnConfidence * 0.4 + columnCountScore * 0.3 + bodyDetectionScore * 0.3);
+  }
+
   private calculateOverallConfidence(clusters: CandleColorCluster[]): number {
     if (clusters.length === 0) return 0;
 

@@ -210,3 +210,23 @@ export interface HistogramAnalysisParameters {
   minFrequency?: number; // Minimum frequency threshold (default: 0.01)
   colorSpace?: 'rgb' | 'hsv' | 'lab'; // Color space for analysis (default: 'rgb')
 }
+
+export interface CandleColumn {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  bodyTop: number;
+  bodyBottom: number;
+  wickTop: number;
+  wickBottom: number;
+  hasBody: boolean;
+  confidence: number;
+}
+
+export interface CandleSegmentationResult {
+  boundingBoxes: BoundingBox[];
+  maskPaths: string[];
+  candleColumns: CandleColumn[];
+  confidence: number;
+}
