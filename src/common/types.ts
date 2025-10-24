@@ -134,9 +134,31 @@ export interface YAxisLabel {
   ocrConfidence: number;
 }
 
+export interface XAxisLabel {
+  pixelX: number;
+  timestamp: string;
+  ocrConfidence: number;
+}
+
 export interface BoundingBox {
   x: number;
   y: number;
   width: number;
   height: number;
+}
+
+export interface TimeframeInfo {
+  timeframe: string; // e.g., '1m', '5m', '1h', '1d'
+  firstTimestamp?: string;
+  lastTimestamp?: string;
+}
+
+export interface XAxisCalibrationOptions {
+  fallbackTimeframe?: TimeframeInfo;
+  manualCalibration?: {
+    firstTimestamp: string;
+    lastTimestamp: string;
+    pixelFirst: number;
+    pixelLast: number;
+  };
 }

@@ -10,7 +10,9 @@ import {
   DenoiseParameters,
   HistogramEqualizationParameters,
   YAxisLabel,
+  XAxisLabel,
   BoundingBox,
+  XAxisCalibrationOptions,
 } from '../common/types';
 
 /**
@@ -803,5 +805,328 @@ export class ImagePreprocessor {
     // Handle decimal numbers
     const parsed = parseFloat(cleanedText);
     return isNaN(parsed) ? null : parsed;
+  }
+
+  /**
+   * Reads X-axis labels from the bottom area of the image using OCR
+   * @param imagePath - Path to the input image
+   * @param bbox - Bounding box defining the area to crop (bottom area for X-axis)
+   * @param options - Optional calibration options for fallback mode
+   * @returns Promise<XAxisLabel[]> - Array of detected timestamp labels with pixel coordinates and confidence
+   */
+  async readXAxisLabels(
+    imagePath: string, 
+    bbox: BoundingBox, 
+    options?: XAxisCalibrationOptions
+  ): Promise<XAxisLabel[]> {
+    const startTime = Date.now();
+    
+    try {
+      // Load and crop the image to the bottom area (X-axis region)
+      const croppedImageBuffer = await this.cropImageForXAxis(imagePath, bbox);
+      
+      if (!croppedImageBuffer) {
+        this.logStep('x_axis_ocr', 'warning', 'Failed to crop image for X-axis OCR');
+        return this.handleXAxisFallback(options);
+      }
+
+      // Run OCR on the cropped image
+      const ocrResult = await this.performOCR(croppedImageBuffer);
+      
+      if (!ocrResult) {
+        this.logStep('x_axis_ocr', 'warning', 'OCR failed to process X-axis image');
+        return this.handleXAxisFallback(options);
+      }
+
+      // Parse OCR results to extract timestamp labels
+      const labels = this.parseXAxisLabels(ocrResult, bbox);
+      
+      // If OCR confidence is low or no labels found, use fallback
+      if (labels.length === 0 || this.calculateAverageConfidence(labels) < 0.7) {
+        this.logStep('x_axis_ocr', 'warning', 'Low OCR confidence, using fallback mode');
+        return this.handleXAxisFallback(options);
+      }
+      
+      this.logStep('x_axis_ocr', 'success', `Detected ${labels.length} X-axis labels`, {
+        processingTime: Date.now() - startTime,
+        labelsCount: labels.length,
+        averageConfidence: this.calculateAverageConfidence(labels),
+      });
+
+      return labels;
+    } catch (error) {
+      this.logStep('x_axis_ocr', 'error', `X-axis OCR failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return this.handleXAxisFallback(options);
+    }
+  }
+
+  /**
+   * Crops the image to focus on the X-axis area (bottom area)
+   * @param imagePath - Path to the input image
+   * @param bbox - Bounding box defining the crop area
+   * @returns Promise<Buffer | null> - Cropped image buffer or null if failed
+   */
+  private async cropImageForXAxis(imagePath: string, bbox: BoundingBox): Promise<Buffer | null> {
+    try {
+      const image = sharp(imagePath);
+      const metadata = await image.metadata();
+      
+      if (!metadata.width || !metadata.height) {
+        throw new Error('Unable to determine image dimensions');
+      }
+
+      // Ensure bbox is within image bounds
+      const cropX = Math.max(0, Math.min(bbox.x, metadata.width - 1));
+      const cropY = Math.max(0, Math.min(bbox.y, metadata.height - 1));
+      const cropWidth = Math.min(bbox.width, metadata.width - cropX);
+      const cropHeight = Math.min(bbox.height, metadata.height - cropY);
+
+      // Crop and enhance the image for better OCR
+      const croppedBuffer = await image
+        .extract({ left: cropX, top: cropY, width: cropWidth, height: cropHeight })
+        .resize({ width: cropWidth * 2, height: cropHeight * 2 }) // Upscale for better OCR
+        .grayscale() // Convert to grayscale
+        .normalize() // Enhance contrast
+        .png()
+        .toBuffer();
+
+      return croppedBuffer;
+    } catch (error) {
+      console.warn(`Failed to crop image for X-axis: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return null;
+    }
+  }
+
+  /**
+   * Parses OCR results to extract timestamp X-axis labels
+   * @param ocrResult - OCR recognition result
+   * @param bbox - Original bounding box for coordinate mapping
+   * @returns XAxisLabel[] - Array of parsed timestamp labels
+   */
+  private parseXAxisLabels(ocrResult: any, bbox: BoundingBox): XAxisLabel[] {
+    const labels: XAxisLabel[] = [];
+    
+    if (!ocrResult.data || !ocrResult.data.words) {
+      return labels;
+    }
+
+    for (const word of ocrResult.data.words) {
+      // Filter for reasonable confidence
+      if (word.confidence < 30) {
+        continue;
+      }
+
+      const timestamp = this.parseTimestampValue(word.text);
+      if (!timestamp) {
+        continue;
+      }
+
+      // Map OCR coordinates back to original image coordinates
+      const pixelX = bbox.x + (word.bbox.x0 / 2); // Divide by 2 due to upscaling
+      
+      labels.push({
+        pixelX: Math.round(pixelX),
+        timestamp,
+        ocrConfidence: word.confidence / 100, // Convert to 0-1 range
+      });
+    }
+
+    // Sort by pixel X coordinate (left to right)
+    labels.sort((a, b) => a.pixelX - b.pixelX);
+
+    return labels;
+  }
+
+  /**
+   * Parses a text string to extract timestamp value
+   * Supports formats like '09:30', '2025-10-23 09:30', '10/23', etc.
+   * @param text - Text string to parse
+   * @returns string | null - Parsed timestamp string or null if not valid timestamp
+   */
+  private parseTimestampValue(text: string): string | null {
+    const cleanedText = text.trim();
+    
+    if (!cleanedText) {
+      return null;
+    }
+
+    // Pattern 1: Time only (HH:MM or H:MM)
+    const timePattern = /^(\d{1,2}):(\d{2})$/;
+    const timeMatch = cleanedText.match(timePattern);
+    if (timeMatch && timeMatch[1] && timeMatch[2]) {
+      const hours = parseInt(timeMatch[1], 10);
+      const minutes = parseInt(timeMatch[2], 10);
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+      }
+    }
+
+    // Pattern 2: Date and time (YYYY-MM-DD HH:MM or MM/DD HH:MM)
+    const dateTimePattern = /^(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{2})$/;
+    const dateTimeMatch = cleanedText.match(dateTimePattern);
+    if (dateTimeMatch && dateTimeMatch[1] && dateTimeMatch[2] && dateTimeMatch[3]) {
+      const date = dateTimeMatch[1];
+      const hours = parseInt(dateTimeMatch[2], 10);
+      const minutes = parseInt(dateTimeMatch[3], 10);
+      if (hours >= 0 && hours <= 23 && minutes >= 0 && minutes <= 59) {
+        return `${date} ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+      }
+    }
+
+    // Pattern 3: Date only (MM/DD or MM/DD/YY)
+    const datePattern = /^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/;
+    const dateMatch = cleanedText.match(datePattern);
+    if (dateMatch && dateMatch[1] && dateMatch[2]) {
+      const month = parseInt(dateMatch[1], 10);
+      const day = parseInt(dateMatch[2], 10);
+      const year = dateMatch[3] ? parseInt(dateMatch[3], 10) : new Date().getFullYear();
+      
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const fullYear = year < 100 ? 2000 + year : year;
+        return `${fullYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+      }
+    }
+
+    // Pattern 4: Month/Day format (common in trading charts)
+    const monthDayPattern = /^(\d{1,2})\/(\d{1,2})$/;
+    const monthDayMatch = cleanedText.match(monthDayPattern);
+    if (monthDayMatch && monthDayMatch[1] && monthDayMatch[2]) {
+      const month = parseInt(monthDayMatch[1], 10);
+      const day = parseInt(monthDayMatch[2], 10);
+      
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const currentYear = new Date().getFullYear();
+        return `${currentYear}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+      }
+    }
+
+    // If no pattern matches, return null
+    return null;
+  }
+
+  /**
+   * Handles fallback mode when OCR fails or confidence is low
+   * @param options - Calibration options containing fallback information
+   * @returns XAxisLabel[] - Generated labels based on fallback options
+   */
+  private handleXAxisFallback(options?: XAxisCalibrationOptions): XAxisLabel[] {
+    if (!options?.fallbackTimeframe && !options?.manualCalibration) {
+      this.logStep('x_axis_fallback', 'warning', 'No fallback options provided, returning empty labels');
+      return [];
+    }
+
+    if (options.manualCalibration) {
+      // Use manual calibration points
+      const labels: XAxisLabel[] = [
+        {
+          pixelX: options.manualCalibration.pixelFirst,
+          timestamp: options.manualCalibration.firstTimestamp,
+          ocrConfidence: 1.0, // Manual calibration has full confidence
+        },
+        {
+          pixelX: options.manualCalibration.pixelLast,
+          timestamp: options.manualCalibration.lastTimestamp,
+          ocrConfidence: 1.0,
+        },
+      ];
+
+      this.logStep('x_axis_fallback', 'success', 'Using manual calibration for X-axis labels', {
+        labelsCount: labels.length,
+        averageConfidence: 1.0,
+      });
+
+      return labels;
+    }
+
+    if (options.fallbackTimeframe) {
+      // Generate labels based on timeframe
+      const labels = this.generateTimeframeLabels(options.fallbackTimeframe);
+      
+      this.logStep('x_axis_fallback', 'success', `Generated ${labels.length} labels from timeframe: ${options.fallbackTimeframe.timeframe}`, {
+        labelsCount: labels.length,
+        averageConfidence: 0.8, // Lower confidence for generated labels
+      });
+
+      return labels;
+    }
+
+    return [];
+  }
+
+  /**
+   * Generates X-axis labels based on timeframe information
+   * @param timeframeInfo - Timeframe information
+   * @returns XAxisLabel[] - Generated labels
+   */
+  private generateTimeframeLabels(timeframeInfo: { timeframe: string; firstTimestamp?: string; lastTimestamp?: string }): XAxisLabel[] {
+    const labels: XAxisLabel[] = [];
+    
+    if (!timeframeInfo.firstTimestamp || !timeframeInfo.lastTimestamp) {
+      return labels;
+    }
+
+    // Parse timeframe to get interval in milliseconds
+    const intervalMs = this.parseTimeframeToMs(timeframeInfo.timeframe);
+    if (intervalMs === 0) {
+      return labels;
+    }
+
+    // Generate labels at regular intervals
+    const startTime = new Date(timeframeInfo.firstTimestamp).getTime();
+    const endTime = new Date(timeframeInfo.lastTimestamp).getTime();
+    
+    // Generate 5-10 labels across the range
+    const numLabels = Math.min(10, Math.max(5, Math.floor((endTime - startTime) / intervalMs)));
+    const step = (endTime - startTime) / (numLabels - 1);
+    
+    for (let i = 0; i < numLabels; i++) {
+      const timestamp = new Date(startTime + i * step);
+      const pixelX = Math.floor((i / (numLabels - 1)) * 800); // Assume 800px width
+      
+      labels.push({
+        pixelX,
+        timestamp: timestamp.toISOString(),
+        ocrConfidence: 0.8, // Generated labels have lower confidence
+      });
+    }
+
+    return labels;
+  }
+
+  /**
+   * Parses timeframe string to milliseconds
+   * @param timeframe - Timeframe string (e.g., '1m', '5m', '1h', '1d')
+   * @returns number - Interval in milliseconds
+   */
+  private parseTimeframeToMs(timeframe: string): number {
+    const match = timeframe.match(/^(\d+)([smhd])$/);
+    if (!match || !match[1] || !match[2]) {
+      return 0;
+    }
+
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+
+    switch (unit) {
+      case 's': return value * 1000;
+      case 'm': return value * 60 * 1000;
+      case 'h': return value * 60 * 60 * 1000;
+      case 'd': return value * 24 * 60 * 60 * 1000;
+      default: return 0;
+    }
+  }
+
+  /**
+   * Calculates average confidence from an array of labels
+   * @param labels - Array of labels with confidence values
+   * @returns number - Average confidence (0-1)
+   */
+  private calculateAverageConfidence(labels: XAxisLabel[]): number {
+    if (labels.length === 0) {
+      return 0;
+    }
+    
+    const totalConfidence = labels.reduce((sum, label) => sum + label.ocrConfidence, 0);
+    return totalConfidence / labels.length;
   }
 }
