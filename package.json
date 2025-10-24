@@ -31,7 +31,14 @@
     "segmentation:pipeline": "ts-node bin/segmentation-cli.ts full-pipeline",
     "evaluate": "ts-node bin/evaluate-cli.ts",
     "dev:backend": "ts-node backend/server.ts",
-    "start:backend": "node dist/backend/server.js"
+    "start:backend": "node dist/backend/server.js",
+    "release": "node scripts/release.js",
+    "release:patch": "node scripts/release.js --type patch",
+    "release:minor": "node scripts/release.js --type minor",
+    "release:major": "node scripts/release.js --type major",
+    "release:dry": "node scripts/release.js --dry-run",
+    "release:pre": "node scripts/release.js --pre-release",
+    "release:quick": "node scripts/release.js --skip-tests --skip-build"
   },
   "keywords": [
     "candlestick",
