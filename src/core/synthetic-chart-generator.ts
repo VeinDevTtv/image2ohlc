@@ -90,6 +90,16 @@ export class SyntheticChartGenerator {
   }
 
   /**
+   * Generates synthetic candlestick data for segmentation
+   * @param params - Chart generation parameters
+   * @returns Array of synthetic candlestick data
+   */
+  generateCandlestickData(params: SyntheticChartParameters = {}): SyntheticCandlestick[] {
+    const config = { ...this.defaultParams, ...params };
+    return this.generateOHLCData(config.candleCount, config.priceRange);
+  }
+
+  /**
    * Creates a synthetic candlestick chart image
    * @param params - Chart generation parameters
    * @returns Promise<Buffer> - Generated chart image buffer

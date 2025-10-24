@@ -5,7 +5,8 @@
   "main": "dist/index.js",
   "bin": {
     "scan": "./bin/scan.js",
-    "preprocess": "./bin/preprocess-cli.js"
+    "preprocess": "./bin/preprocess-cli.js",
+    "segmentation": "./bin/segmentation-cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -23,6 +24,10 @@
     "dev:frontend": "vite",
     "build:frontend": "tsc && vite build",
     "preview:frontend": "vite preview",
+    "segmentation:generate": "ts-node bin/segmentation-cli.ts generate-dataset",
+    "segmentation:train": "ts-node bin/segmentation-cli.ts train-model",
+    "segmentation:infer": "ts-node bin/segmentation-cli.ts infer",
+    "segmentation:pipeline": "ts-node bin/segmentation-cli.ts full-pipeline",
     "dev:backend": "ts-node backend/server.ts",
     "start:backend": "node dist/backend/server.js"
   },
@@ -65,6 +70,7 @@
     "@radix-ui/react-label": "^2.0.2",
     "@radix-ui/react-slot": "^1.0.2",
     "@radix-ui/react-toast": "^1.1.5",
+    "@tensorflow/tfjs-node": "^4.15.0",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/sharp": "^0.31.1",
@@ -75,6 +81,7 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "lucide-react": "^0.323.0",
+    "onnxruntime-node": "^1.16.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "sharp": "^0.34.4",

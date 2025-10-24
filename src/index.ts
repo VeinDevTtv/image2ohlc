@@ -7,6 +7,11 @@ export { ImagePreprocessor } from './core/image-preprocessor';
 export { SyntheticChartGenerator } from './core/synthetic-chart-generator';
 export { scanImage, findPlotArea, calibratePlotAreaManually } from './core/image-scanner';
 
+// Export segmentation pipeline
+export { DatasetGenerator } from './core/dataset-generator';
+export { TrainingPipeline } from './core/training-pipeline';
+export { SegmentationInference, TensorFlowJSEngine, ONNXRuntimeEngine } from './core/segmentation-inference';
+
 // Export types
 export type {
   PreprocessingResult,
@@ -35,6 +40,26 @@ export type {
   SyntheticCandlestick,
   SyntheticChartParameters,
 } from './core/synthetic-chart-generator';
+
+// Export segmentation types
+export type {
+  DatasetEntry,
+  DatasetConfig,
+  AugmentationParameters,
+} from './core/dataset-generator';
+
+export type {
+  TrainingConfig,
+  TrainingResults,
+} from './core/training-pipeline';
+
+export type {
+  SegmentationResult,
+  PixelSegmentation,
+  ModelConfig,
+} from './core/segmentation-inference';
+
+export { SegmentationClass } from './core/segmentation-inference';
 
 export function main(): void {
   console.log('Candles from Image - OHLC Extractor');
