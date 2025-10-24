@@ -230,3 +230,19 @@ export interface CandleSegmentationResult {
   candleColumns: CandleColumn[];
   confidence: number;
 }
+
+export interface TimestampAssignment {
+  candleIndex: number;
+  pixelX: number;
+  timestamp: string;
+  confidence: number;
+  method: 'ocr' | 'estimated';
+}
+
+export interface TimestampAssignmentResult {
+  assignments: TimestampAssignment[];
+  overallConfidence: number;
+  method: 'ocr' | 'estimated' | 'hybrid';
+  timeframe: string;
+  anchorTimestamp?: string;
+}

@@ -18,6 +18,8 @@ import {
   CandleColorCluster,
   CandleColorDetectionResult,
   KMeansParameters,
+  TimestampAssignment,
+  TimestampAssignmentResult,
   HistogramAnalysisParameters,
   CandleColumn,
   CandleSegmentationResult,
@@ -2377,5 +2379,300 @@ export class ImagePreprocessor {
     const coverageScore = Math.min(clusters.length / 6, 1); // Ideal: 6 clusters
 
     return (avgConfidence * 0.5 + typeDiversity * 0.3 + coverageScore * 0.2);
+  }
+
+  /**
+   * Assigns ISO timestamps to candle centers based on X-axis labels and timeframe
+   * @param candleCenters - Array of candle center pixel coordinates
+   * @param xLabels - Array of X-axis timestamp labels with pixel coordinates
+   * @param timeframe - Timeframe string (e.g., '1m', '5m', '1h', '1d')
+   * @param anchorTimestamp - Optional anchor timestamp for estimation fallback
+   * @returns TimestampAssignmentResult - Timestamp assignments with confidence scores
+   */
+  assignTimestamps(
+    candleCenters: PixelCoordinates[],
+    xLabels: XAxisLabel[],
+    timeframe: string,
+    anchorTimestamp?: string
+  ): TimestampAssignmentResult {
+    this.logStep('assign_timestamps', 'success', `Starting timestamp assignment for ${candleCenters.length} candles`);
+
+    try {
+      // Sort candle centers by X coordinate
+      const sortedCandles = [...candleCenters].sort((a, b) => a.x - b.x);
+      
+      // Sort X-axis labels by pixel X coordinate
+      const sortedLabels = [...xLabels].sort((a, b) => a.pixelX - b.pixelX);
+
+      let assignments: TimestampAssignment[];
+      let method: 'ocr' | 'estimated' | 'hybrid';
+      let overallConfidence: number;
+
+      if (sortedLabels.length >= 2) {
+        // Use OCR-based assignment with interpolation
+        const ocrResult = this.assignTimestampsFromOCR(sortedCandles, sortedLabels, timeframe);
+        assignments = ocrResult.assignments;
+        method = ocrResult.method;
+        overallConfidence = ocrResult.overallConfidence;
+      } else if (sortedLabels.length === 1) {
+        // Use single OCR label with extrapolation
+        const ocrResult = this.assignTimestampsFromOCR(sortedCandles, sortedLabels, timeframe);
+        assignments = ocrResult.assignments;
+        method = ocrResult.method;
+        overallConfidence = ocrResult.overallConfidence;
+      } else if (anchorTimestamp) {
+        // Pure estimation based on timeframe and anchor
+        const estimatedResult = this.assignTimestampsFromEstimation(sortedCandles, null, timeframe, anchorTimestamp);
+        assignments = estimatedResult.assignments;
+        method = estimatedResult.method;
+        overallConfidence = estimatedResult.overallConfidence;
+      } else {
+        throw new Error('Insufficient data for timestamp assignment: need at least 1 OCR label or anchor timestamp');
+      }
+
+      this.logStep('assign_timestamps', 'success', `Assigned timestamps using ${method} method with ${overallConfidence.toFixed(3)} confidence`, {
+        labelsCount: assignments.length,
+        averageConfidence: overallConfidence,
+      });
+
+      const result: TimestampAssignmentResult = {
+        assignments,
+        overallConfidence,
+        method,
+        timeframe,
+      };
+      
+      if (anchorTimestamp) {
+        result.anchorTimestamp = anchorTimestamp;
+      }
+      
+      return result;
+
+    } catch (error) {
+      this.logStep('assign_timestamps', 'error', `Failed to assign timestamps: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Assigns timestamps using OCR labels with interpolation
+   * @param sortedCandles - Candle centers sorted by X coordinate
+   * @param sortedLabels - X-axis labels sorted by pixel X coordinate
+   * @param timeframe - Timeframe string
+   * @returns TimestampAssignmentResult - OCR-based assignments
+   */
+  private assignTimestampsFromOCR(
+    sortedCandles: PixelCoordinates[],
+    sortedLabels: XAxisLabel[],
+    timeframe: string
+  ): TimestampAssignmentResult {
+    const assignments: TimestampAssignment[] = [];
+    
+    // Calculate average OCR confidence
+    const avgOcrConfidence = this.calculateAverageConfidence(sortedLabels);
+    
+    // Parse timeframe to get interval
+    const intervalMs = this.parseTimeframeToMs(timeframe);
+    if (intervalMs === 0) {
+      throw new Error(`Invalid timeframe: ${timeframe}`);
+    }
+    
+    for (let i = 0; i < sortedCandles.length; i++) {
+      const candle = sortedCandles[i]!;
+      
+      // Find the two nearest OCR labels for interpolation
+      const nearestLabels = this.findNearestLabels(candle.x, sortedLabels);
+      
+      if (nearestLabels.length === 2) {
+        // Interpolate between two labels
+        const timestamp = this.interpolateTimestamp(candle.x, nearestLabels[0]!, nearestLabels[1]!);
+        const confidence = Math.min(avgOcrConfidence, 0.9); // Cap OCR confidence
+        
+        assignments.push({
+          candleIndex: i,
+          pixelX: candle.x,
+          timestamp,
+          confidence,
+          method: 'ocr',
+        });
+      } else if (nearestLabels.length === 1) {
+        // Extrapolate from single label using timeframe
+        const timestamp = this.extrapolateTimestamp(candle.x, nearestLabels[0]!, intervalMs, sortedCandles);
+        const confidence = Math.min(avgOcrConfidence * 0.7, 0.6); // Lower confidence for extrapolation
+        
+        assignments.push({
+          candleIndex: i,
+          pixelX: candle.x,
+          timestamp,
+          confidence,
+          method: 'ocr',
+        });
+      }
+    }
+    
+    return {
+      assignments,
+      overallConfidence: Math.min(avgOcrConfidence, 0.8), // Cap overall confidence for single label extrapolation
+      method: 'ocr',
+      timeframe,
+    };
+  }
+
+  /**
+   * Assigns timestamps using estimation based on timeframe and anchor
+   * @param sortedCandles - Candle centers sorted by X coordinate
+   * @param singleLabel - Single OCR label (optional)
+   * @param timeframe - Timeframe string
+   * @param anchorTimestamp - Anchor timestamp for estimation
+   * @returns TimestampAssignmentResult - Estimated assignments
+   */
+  private assignTimestampsFromEstimation(
+    sortedCandles: PixelCoordinates[],
+    singleLabel: XAxisLabel | null,
+    timeframe: string,
+    anchorTimestamp: string
+  ): TimestampAssignmentResult {
+    const assignments: TimestampAssignment[] = [];
+    const intervalMs = this.parseTimeframeToMs(timeframe);
+    
+    if (intervalMs === 0) {
+      throw new Error(`Invalid timeframe: ${timeframe}`);
+    }
+    
+    let baseTimestamp: Date;
+    let basePixelX: number;
+    let confidence: number;
+    
+    if (singleLabel) {
+      // Use single OCR label as reference
+      baseTimestamp = new Date(singleLabel.timestamp);
+      basePixelX = singleLabel.pixelX;
+      confidence = Math.min(singleLabel.ocrConfidence * 0.7, 0.6); // Lower confidence for estimation
+    } else {
+      // Use anchor timestamp and assume first candle
+      baseTimestamp = new Date(anchorTimestamp);
+      basePixelX = sortedCandles[0]?.x || 0;
+      confidence = 0.4; // Lower confidence for pure estimation
+    }
+    
+    // Calculate average candle spacing from the candle centers
+    let avgCandleSpacing = 15; // Default fallback
+    if (sortedCandles.length > 1) {
+      const spacings: number[] = [];
+      for (let i = 1; i < sortedCandles.length; i++) {
+        spacings.push(sortedCandles[i]!.x - sortedCandles[i - 1]!.x);
+      }
+      avgCandleSpacing = spacings.reduce((sum, spacing) => sum + spacing, 0) / spacings.length;
+    }
+    
+    for (let i = 0; i < sortedCandles.length; i++) {
+      const candle = sortedCandles[i]!;
+      
+      // Calculate pixel offset from base
+      const pixelOffset = candle.x - basePixelX;
+      
+      // Estimate candle index based on calculated average candle spacing
+      const estimatedCandleIndex = Math.round(pixelOffset / avgCandleSpacing);
+      
+      // Calculate timestamp
+      const timestampMs = baseTimestamp.getTime() + (estimatedCandleIndex * intervalMs);
+      const timestamp = new Date(timestampMs).toISOString();
+      
+      assignments.push({
+        candleIndex: i,
+        pixelX: candle.x,
+        timestamp,
+        confidence,
+        method: 'estimated',
+      });
+    }
+    
+    return {
+      assignments,
+      overallConfidence: confidence,
+      method: 'estimated',
+      timeframe,
+      anchorTimestamp,
+    };
+  }
+
+  /**
+   * Finds the two nearest OCR labels to a given pixel X coordinate
+   * @param pixelX - Target pixel X coordinate
+   * @param sortedLabels - X-axis labels sorted by pixel X coordinate
+   * @returns XAxisLabel[] - Array of 0-2 nearest labels
+   */
+  private findNearestLabels(pixelX: number, sortedLabels: XAxisLabel[]): XAxisLabel[] {
+    if (sortedLabels.length === 0) return [];
+    if (sortedLabels.length === 1) return [sortedLabels[0]!];
+    
+    // Find the two labels that bracket the pixel X coordinate
+    let leftLabel: XAxisLabel | null = null;
+    let rightLabel: XAxisLabel | null = null;
+    
+    for (let i = 0; i < sortedLabels.length; i++) {
+      const label = sortedLabels[i]!;
+      
+      if (label.pixelX <= pixelX) {
+        leftLabel = label;
+      } else {
+        rightLabel = label;
+        break;
+      }
+    }
+    
+    const result: XAxisLabel[] = [];
+    if (leftLabel) result.push(leftLabel);
+    if (rightLabel) result.push(rightLabel);
+    
+    return result;
+  }
+
+  /**
+   * Interpolates timestamp between two OCR labels
+   * @param pixelX - Target pixel X coordinate
+   * @param leftLabel - Left OCR label
+   * @param rightLabel - Right OCR label
+   * @returns string - Interpolated ISO timestamp
+   */
+  private interpolateTimestamp(pixelX: number, leftLabel: XAxisLabel, rightLabel: XAxisLabel): string {
+    const leftTime = new Date(leftLabel.timestamp).getTime();
+    const rightTime = new Date(rightLabel.timestamp).getTime();
+    
+    // Linear interpolation
+    const ratio = (pixelX - leftLabel.pixelX) / (rightLabel.pixelX - leftLabel.pixelX);
+    const interpolatedTime = leftTime + ratio * (rightTime - leftTime);
+    
+    return new Date(interpolatedTime).toISOString();
+  }
+
+  /**
+   * Extrapolates timestamp from a single OCR label using timeframe
+   * @param pixelX - Target pixel X coordinate
+   * @param label - Reference OCR label
+   * @param intervalMs - Timeframe interval in milliseconds
+   * @param sortedCandles - All candle centers for spacing calculation
+   * @returns string - Extrapolated ISO timestamp
+   */
+  private extrapolateTimestamp(pixelX: number, label: XAxisLabel, intervalMs: number, sortedCandles: PixelCoordinates[]): string {
+    const labelTime = new Date(label.timestamp).getTime();
+    
+    // Calculate average candle spacing from the candle centers
+    let avgCandleSpacing = 15; // Default fallback
+    if (sortedCandles.length > 1) {
+      const spacings: number[] = [];
+      for (let i = 1; i < sortedCandles.length; i++) {
+        spacings.push(sortedCandles[i]!.x - sortedCandles[i - 1]!.x);
+      }
+      avgCandleSpacing = spacings.reduce((sum, spacing) => sum + spacing, 0) / spacings.length;
+    }
+    
+    // Estimate candle index based on pixel offset and calculated average candle spacing
+    const pixelOffset = pixelX - label.pixelX;
+    const estimatedCandleIndex = Math.round(pixelOffset / avgCandleSpacing);
+    
+    const extrapolatedTime = labelTime + (estimatedCandleIndex * intervalMs);
+    
+    return new Date(extrapolatedTime).toISOString();
   }
 }
