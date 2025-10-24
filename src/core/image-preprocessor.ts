@@ -2,12 +2,15 @@ import sharp from 'sharp';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import Tesseract from 'tesseract.js';
 import {
   PreprocessingResult,
   PreprocessingLog,
   DeskewParameters,
   DenoiseParameters,
   HistogramEqualizationParameters,
+  YAxisLabel,
+  BoundingBox,
 } from '../common/types';
 
 /**
@@ -634,5 +637,171 @@ export class ImagePreprocessor {
    */
   getOutputDirectory(): string {
     return this.outputDir;
+  }
+
+  /**
+   * Reads Y-axis labels from the left area of the image using OCR
+   * @param imagePath - Path to the input image
+   * @param bbox - Bounding box defining the area to crop (left side for Y-axis)
+   * @returns Promise<YAxisLabel[]> - Array of detected labels with pixel coordinates and confidence
+   */
+  async readYAxisLabels(imagePath: string, bbox: BoundingBox): Promise<YAxisLabel[]> {
+    const startTime = Date.now();
+    
+    try {
+      // Load and crop the image to the left area (Y-axis region)
+      const croppedImageBuffer = await this.cropImageForYAxis(imagePath, bbox);
+      
+      if (!croppedImageBuffer) {
+        this.logStep('y_axis_ocr', 'warning', 'Failed to crop image for Y-axis OCR');
+        return [];
+      }
+
+      // Run OCR on the cropped image
+      const ocrResult = await this.performOCR(croppedImageBuffer);
+      
+      if (!ocrResult) {
+        this.logStep('y_axis_ocr', 'warning', 'OCR failed to process Y-axis image');
+        return [];
+      }
+
+      // Parse OCR results to extract numeric labels
+      const labels = this.parseYAxisLabels(ocrResult, bbox);
+      
+      this.logStep('y_axis_ocr', 'success', `Detected ${labels.length} Y-axis labels`, {
+        processingTime: Date.now() - startTime,
+        labelsCount: labels.length,
+        averageConfidence: labels.length > 0 ? labels.reduce((sum, label) => sum + label.ocrConfidence, 0) / labels.length : 0,
+      });
+
+      return labels;
+    } catch (error) {
+      this.logStep('y_axis_ocr', 'error', `Y-axis OCR failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return [];
+    }
+  }
+
+  /**
+   * Crops the image to focus on the Y-axis area (left side)
+   * @param imagePath - Path to the input image
+   * @param bbox - Bounding box defining the crop area
+   * @returns Promise<Buffer | null> - Cropped image buffer or null if failed
+   */
+  private async cropImageForYAxis(imagePath: string, bbox: BoundingBox): Promise<Buffer | null> {
+    try {
+      const image = sharp(imagePath);
+      const metadata = await image.metadata();
+      
+      if (!metadata.width || !metadata.height) {
+        throw new Error('Unable to determine image dimensions');
+      }
+
+      // Ensure bbox is within image bounds
+      const cropX = Math.max(0, Math.min(bbox.x, metadata.width - 1));
+      const cropY = Math.max(0, Math.min(bbox.y, metadata.height - 1));
+      const cropWidth = Math.min(bbox.width, metadata.width - cropX);
+      const cropHeight = Math.min(bbox.height, metadata.height - cropY);
+
+      // Crop and enhance the image for better OCR
+      const croppedBuffer = await image
+        .extract({ left: cropX, top: cropY, width: cropWidth, height: cropHeight })
+        .resize({ width: cropWidth * 2, height: cropHeight * 2 }) // Upscale for better OCR
+        .grayscale() // Convert to grayscale
+        .normalize() // Enhance contrast
+        .png()
+        .toBuffer();
+
+      return croppedBuffer;
+    } catch (error) {
+      console.warn(`Failed to crop image for Y-axis: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return null;
+    }
+  }
+
+  /**
+   * Performs OCR on the cropped image buffer
+   * @param imageBuffer - Cropped image buffer
+   * @returns Promise<any | null> - OCR result or null if failed
+   */
+  private async performOCR(imageBuffer: Buffer): Promise<any | null> {
+    try {
+      const result = await Tesseract.recognize(imageBuffer, 'eng', {
+        logger: (m) => {
+          if (m.status === 'recognizing text') {
+            // Suppress verbose logging
+            return;
+          }
+        },
+      });
+
+      return result;
+    } catch (error) {
+      console.warn(`OCR processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      return null;
+    }
+  }
+
+  /**
+   * Parses OCR results to extract numeric Y-axis labels
+   * @param ocrResult - OCR recognition result
+   * @param bbox - Original bounding box for coordinate mapping
+   * @returns YAxisLabel[] - Array of parsed labels
+   */
+  private parseYAxisLabels(ocrResult: any, bbox: BoundingBox): YAxisLabel[] {
+    const labels: YAxisLabel[] = [];
+    
+    if (!ocrResult.data || !ocrResult.data.words) {
+      return labels;
+    }
+
+    for (const word of ocrResult.data.words) {
+      // Filter for numeric values with reasonable confidence
+      if (word.confidence < 30) {
+        continue;
+      }
+
+      const numericValue = this.parseNumericValue(word.text);
+      if (numericValue === null) {
+        continue;
+      }
+
+      // Map OCR coordinates back to original image coordinates
+      const pixelY = bbox.y + (word.bbox.y0 / 2); // Divide by 2 due to upscaling
+      
+      labels.push({
+        pixelY: Math.round(pixelY),
+        value: numericValue,
+        ocrConfidence: word.confidence / 100, // Convert to 0-1 range
+      });
+    }
+
+    // Sort by pixel Y coordinate (top to bottom)
+    labels.sort((a, b) => a.pixelY - b.pixelY);
+
+    return labels;
+  }
+
+  /**
+   * Parses a text string to extract numeric value
+   * @param text - Text string to parse
+   * @returns number | null - Parsed numeric value or null if not numeric
+   */
+  private parseNumericValue(text: string): number | null {
+    // Clean the text and extract numeric value
+    const cleanedText = text.trim().replace(/[^\d.,\-+Ee]/g, '');
+    
+    if (!cleanedText) {
+      return null;
+    }
+
+    // Handle scientific notation
+    if (cleanedText.includes('E') || cleanedText.includes('e')) {
+      const parsed = parseFloat(cleanedText);
+      return isNaN(parsed) ? null : parsed;
+    }
+
+    // Handle decimal numbers
+    const parsed = parseFloat(cleanedText);
+    return isNaN(parsed) ? null : parsed;
   }
 }

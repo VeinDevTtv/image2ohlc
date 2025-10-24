@@ -47,8 +47,10 @@
   },
   "dependencies": {
     "@types/sharp": "^0.31.1",
+    "@types/tesseract.js": "^0.0.2",
     "@types/uuid": "^9.0.8",
     "sharp": "^0.34.4",
+    "tesseract.js": "^6.0.1",
     "tsconfig-paths": "^4.2.0",
     "uuid": "^9.0.1"
   },

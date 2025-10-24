@@ -82,6 +82,8 @@ export interface PreprocessingLog {
       width: number;
       height: number;
     };
+    labelsCount?: number;
+    averageConfidence?: number;
   } | undefined;
 }
 
@@ -124,4 +126,17 @@ export interface UserClickCalibration {
   topLeft: PixelCoordinates;
   topRight: PixelCoordinates;
   bottomLeft: PixelCoordinates;
+}
+
+export interface YAxisLabel {
+  pixelY: number;
+  value: number;
+  ocrConfidence: number;
+}
+
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
