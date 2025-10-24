@@ -21,6 +21,7 @@ import {
   HistogramAnalysisParameters,
   CandleColumn,
   CandleSegmentationResult,
+  PixelCoordinates,
 } from '../common/types';
 
 /**
@@ -570,6 +571,186 @@ export class ImagePreprocessor {
     }
     
     return filePath;
+  }
+
+  /**
+   * Extracts OHLC values from a candlestick column mask
+   * @param columnMask - Mask image for a single candlestick column (MockMat)
+   * @param yMap - Y-axis mapping result for pixel-to-price conversion
+   * @returns Object containing OHLC values, pixel coordinates, and confidence
+   */
+  public extractOHLCFromColumn(
+    columnMask: MockMat,
+    yMap: YMappingResult
+  ): {
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    pixelCoords: {
+      open: PixelCoordinates;
+      high: PixelCoordinates;
+      low: PixelCoordinates;
+      close: PixelCoordinates;
+    };
+    confidence: number;
+  } {
+    const maskData = columnMask.getData();
+    const width = columnMask.cols;
+    const height = columnMask.rows;
+    
+    // Find the center X coordinate of the column
+    const centerX = Math.floor(width / 2);
+    
+    // Scan the center column to find body and wick extents
+    let bodyTop = height;
+    let bodyBottom = 0;
+    let wickTop = height;
+    let wickBottom = 0;
+    let hasBody = false;
+    
+    // Find the vertical extents of the candle
+    for (let y = 0; y < height; y++) {
+      const pixelIndex = y * width + centerX;
+      const pixelValue = maskData[pixelIndex * 3]!; // Check if pixel is white (255)
+      
+      if (pixelValue > 128) {
+        wickTop = Math.min(wickTop, y);
+        wickBottom = Math.max(wickBottom, y);
+        
+        // Check if this is part of a body (more pixels in horizontal direction)
+        const bodyPixels = this.countBodyPixelsInRow(maskData, y, width);
+        if (bodyPixels > width * 0.3) { // At least 30% of row width
+          hasBody = true;
+          bodyTop = Math.min(bodyTop, y);
+          bodyBottom = Math.max(bodyBottom, y);
+        }
+      }
+    }
+    
+    // Handle case where no pixels are found (empty mask)
+    if (wickTop === height && wickBottom === 0) {
+      // No pixels found, return default values
+      return {
+        open: yMap.pixelYToPrice(height / 2),
+        high: yMap.pixelYToPrice(0),
+        low: yMap.pixelYToPrice(height),
+        close: yMap.pixelYToPrice(height / 2),
+        pixelCoords: {
+          open: { x: centerX, y: Math.floor(height / 2) },
+          high: { x: centerX, y: 0 },
+          low: { x: centerX, y: height },
+          close: { x: centerX, y: Math.floor(height / 2) }
+        },
+        confidence: 0.1 // Very low confidence for empty mask
+      };
+    }
+    
+    // If no body detected, treat the entire range as wick (doji candle)
+    if (!hasBody) {
+      bodyTop = wickTop;
+      bodyBottom = wickBottom;
+    }
+    
+    // Convert pixel coordinates to prices using yMap
+    const highPrice = yMap.pixelYToPrice(wickTop);
+    const lowPrice = yMap.pixelYToPrice(wickBottom);
+    
+    // For candlesticks, open and close are typically at the body boundaries
+    // The exact mapping depends on the candle type (bullish/bearish)
+    // For now, we'll use the body boundaries as open/close
+    const openPrice = yMap.pixelYToPrice(bodyTop);
+    const closePrice = yMap.pixelYToPrice(bodyBottom);
+    
+    // Calculate confidence based on mask quality and extraction accuracy
+    const confidence = this.calculateOHLCExtractionConfidence(
+      columnMask,
+      hasBody,
+      wickBottom - wickTop,
+      bodyBottom - bodyTop
+    );
+    
+    return {
+      open: openPrice,
+      high: highPrice,
+      low: lowPrice,
+      close: closePrice,
+      pixelCoords: {
+        open: { x: centerX, y: bodyTop },
+        high: { x: centerX, y: wickTop },
+        low: { x: centerX, y: wickBottom },
+        close: { x: centerX, y: bodyBottom }
+      },
+      confidence
+    };
+  }
+
+  /**
+   * Counts the number of body pixels in a specific row
+   * @param maskData - Mask image data
+   * @param row - Row index
+   * @param width - Image width
+   * @returns Number of body pixels in the row
+   */
+  private countBodyPixelsInRow(maskData: Uint8Array, row: number, width: number): number {
+    let count = 0;
+    for (let x = 0; x < width; x++) {
+      const pixelIndex = row * width + x;
+      if (maskData[pixelIndex * 3]! > 128) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Calculates confidence score for OHLC extraction
+   * @param columnMask - Column mask
+   * @param hasBody - Whether the candle has a body
+   * @param wickHeight - Height of the wick in pixels
+   * @param bodyHeight - Height of the body in pixels
+   * @returns Confidence score (0-1)
+   */
+  private calculateOHLCExtractionConfidence(
+    columnMask: MockMat,
+    hasBody: boolean,
+    wickHeight: number,
+    bodyHeight: number
+  ): number {
+    let confidence = 0.5; // Base confidence
+    
+    // Increase confidence if candle has a body
+    if (hasBody) {
+      confidence += 0.2;
+    }
+    
+    // Increase confidence for reasonable candle heights
+    if (wickHeight > 10 && wickHeight < 200) {
+      confidence += 0.1;
+    }
+    
+    // Increase confidence if body height is reasonable relative to wick
+    if (bodyHeight > 0 && bodyHeight < wickHeight * 0.8) {
+      confidence += 0.1;
+    }
+    
+    // Check mask density (how much of the column is filled)
+    const maskData = columnMask.getData();
+    const totalPixels = columnMask.rows * columnMask.cols;
+    let filledPixels = 0;
+    
+    for (let i = 0; i < maskData.length; i += 3) {
+      if (maskData[i]! > 128) {
+        filledPixels++;
+      }
+    }
+    
+    const density = filledPixels / totalPixels;
+    if (density > 0.1 && density < 0.7) { // Reasonable density range
+      confidence += 0.1;
+    }
+    
+    return Math.min(confidence, 1.0);
   }
 
   /**
