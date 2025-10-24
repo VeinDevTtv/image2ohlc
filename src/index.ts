@@ -24,6 +24,7 @@ export type {
   PlotAreaBounds,
   ContourDetectionParameters,
   UserClickCalibration,
+  YMappingResult,
 } from './common/types';
 
 export type {

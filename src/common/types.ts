@@ -162,3 +162,14 @@ export interface XAxisCalibrationOptions {
     pixelLast: number;
   };
 }
+
+export interface YMappingResult {
+  pixelYToPrice: (pixelY: number) => number;
+  priceToPixelY: (price: number) => number;
+  scaleType: 'linear' | 'logarithmic';
+  confidence: number;
+  minPrice: number;
+  maxPrice: number;
+  minPixelY: number;
+  maxPixelY: number;
+}

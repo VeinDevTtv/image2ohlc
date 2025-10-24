@@ -13,6 +13,7 @@ import {
   XAxisLabel,
   BoundingBox,
   XAxisCalibrationOptions,
+  YMappingResult,
 } from '../common/types';
 
 /**
@@ -1128,5 +1129,190 @@ export class ImagePreprocessor {
     
     const totalConfidence = labels.reduce((sum, label) => sum + label.ocrConfidence, 0);
     return totalConfidence / labels.length;
+  }
+
+  /**
+   * Computes Y-axis mapping functions from label pairs
+   * @param labelPairs - Array of Y-axis labels with pixel coordinates and values
+   * @returns YMappingResult - Mapping functions and calibration information
+   */
+  computeYMapping(labelPairs: YAxisLabel[]): YMappingResult {
+    if (labelPairs.length < 2) {
+      throw new Error('At least 2 label pairs are required for Y-axis mapping');
+    }
+
+    // Sort labels by pixel Y coordinate (top to bottom)
+    const sortedLabels = [...labelPairs].sort((a, b) => a.pixelY - b.pixelY);
+    
+    const minPixelY = sortedLabels[0]!.pixelY;
+    const maxPixelY = sortedLabels[sortedLabels.length - 1]!.pixelY;
+    const minPrice = sortedLabels[0]!.value;
+    const maxPrice = sortedLabels[sortedLabels.length - 1]!.value;
+
+    // Detect scale type (linear vs logarithmic)
+    const scaleType = this.detectScaleType(sortedLabels);
+    
+    // Calculate confidence based on OCR confidences and number of labels
+    const confidence = this.calculateYMappingConfidence(sortedLabels);
+
+    let pixelYToPrice: (pixelY: number) => number;
+    let priceToPixelY: (price: number) => number;
+
+    if (scaleType === 'logarithmic') {
+      // Logarithmic scale mapping
+      const logMinPrice = Math.log(Math.max(minPrice, Number.EPSILON));
+      const logMaxPrice = Math.log(Math.max(maxPrice, Number.EPSILON));
+      
+      pixelYToPrice = (pixelY: number): number => {
+        if (pixelY <= minPixelY) return minPrice;
+        if (pixelY >= maxPixelY) return maxPrice;
+        
+        const ratio = (pixelY - minPixelY) / (maxPixelY - minPixelY);
+        const logPrice = logMinPrice + ratio * (logMaxPrice - logMinPrice);
+        return Math.exp(logPrice);
+      };
+
+      priceToPixelY = (price: number): number => {
+        if (price <= minPrice) return minPixelY;
+        if (price >= maxPrice) return maxPixelY;
+        
+        const logPrice = Math.log(Math.max(price, Number.EPSILON));
+        const ratio = (logPrice - logMinPrice) / (logMaxPrice - logMinPrice);
+        return minPixelY + ratio * (maxPixelY - minPixelY);
+      };
+    } else {
+      // Linear scale mapping
+      pixelYToPrice = (pixelY: number): number => {
+        if (pixelY <= minPixelY) return minPrice;
+        if (pixelY >= maxPixelY) return maxPrice;
+        
+        const ratio = (pixelY - minPixelY) / (maxPixelY - minPixelY);
+        return minPrice + ratio * (maxPrice - minPrice);
+      };
+
+      priceToPixelY = (price: number): number => {
+        if (price <= minPrice) return minPixelY;
+        if (price >= maxPrice) return maxPixelY;
+        
+        const ratio = (price - minPrice) / (maxPrice - minPrice);
+        return minPixelY + ratio * (maxPixelY - minPixelY);
+      };
+    }
+
+    return {
+      pixelYToPrice,
+      priceToPixelY,
+      scaleType,
+      confidence,
+      minPrice,
+      maxPrice,
+      minPixelY,
+      maxPixelY,
+    };
+  }
+
+  /**
+   * Detects whether the scale is linear or logarithmic based on label distribution
+   * @param labels - Sorted array of Y-axis labels
+   * @returns 'linear' | 'logarithmic' - Detected scale type
+   */
+  private detectScaleType(labels: YAxisLabel[]): 'linear' | 'logarithmic' {
+    if (labels.length < 3) {
+      return 'linear'; // Default to linear for insufficient data
+    }
+
+    // Check for exponential notation first (strong indicator of log scale)
+    const hasExponentialNotation = labels.some(label => 
+      label.value.toString().includes('e') || label.value.toString().includes('E')
+    );
+
+    if (hasExponentialNotation) {
+      return 'logarithmic';
+    }
+
+    // Analyze price differences vs ratios
+    const priceDifferences: number[] = [];
+    const priceRatios: number[] = [];
+    
+    for (let i = 1; i < labels.length; i++) {
+      const prevPrice = labels[i - 1]!.value;
+      const currPrice = labels[i]!.value;
+      
+      if (prevPrice > 0 && currPrice > 0) {
+        priceDifferences.push(currPrice - prevPrice);
+        priceRatios.push(currPrice / prevPrice);
+      }
+    }
+
+    if (priceDifferences.length === 0) {
+      return 'linear';
+    }
+
+    // Calculate coefficient of variation for differences (linear indicator)
+    const meanDiff = priceDifferences.reduce((sum, diff) => sum + diff, 0) / priceDifferences.length;
+    const diffVariance = priceDifferences.reduce((sum, diff) => sum + Math.pow(diff - meanDiff, 2), 0) / priceDifferences.length;
+    const diffCoefficientOfVariation = Math.sqrt(diffVariance) / Math.abs(meanDiff);
+
+    // Calculate coefficient of variation for ratios (logarithmic indicator)
+    const meanRatio = priceRatios.reduce((sum, ratio) => sum + ratio, 0) / priceRatios.length;
+    const ratioVariance = priceRatios.reduce((sum, ratio) => sum + Math.pow(ratio - meanRatio, 2), 0) / priceRatios.length;
+    const ratioCoefficientOfVariation = Math.sqrt(ratioVariance) / meanRatio;
+
+    // If differences are more consistent (lower CV), it's likely linear
+    // If ratios are more consistent (lower CV), it's likely logarithmic
+    const isLinear = diffCoefficientOfVariation < ratioCoefficientOfVariation && 
+                     diffCoefficientOfVariation < 0.5; // Threshold for consistency
+
+    return isLinear ? 'linear' : 'logarithmic';
+  }
+
+  /**
+   * Calculates confidence for Y-axis mapping based on OCR confidences and label count
+   * @param labels - Array of Y-axis labels
+   * @returns number - Confidence value (0-1)
+   */
+  private calculateYMappingConfidence(labels: YAxisLabel[]): number {
+    if (labels.length === 0) {
+      return 0;
+    }
+
+    // Base confidence from OCR confidences
+    const avgOcrConfidence = labels.reduce((sum, label) => sum + label.ocrConfidence, 0) / labels.length;
+    
+    // Bonus for having more labels (better calibration)
+    const labelCountBonus = Math.min(0.2, labels.length * 0.05);
+    
+    // Penalty for large gaps between labels
+    const maxGapPenalty = this.calculateGapPenalty(labels);
+    
+    // Combine factors
+    const confidence = Math.max(0, Math.min(1, avgOcrConfidence + labelCountBonus - maxGapPenalty));
+    
+    return confidence;
+  }
+
+  /**
+   * Calculates penalty for large gaps between consecutive labels
+   * @param labels - Sorted array of Y-axis labels
+   * @returns number - Gap penalty (0-0.3)
+   */
+  private calculateGapPenalty(labels: YAxisLabel[]): number {
+    if (labels.length < 2) {
+      return 0;
+    }
+
+    const pixelRange = labels[labels.length - 1]!.pixelY - labels[0]!.pixelY;
+    const avgGap = pixelRange / (labels.length - 1);
+    
+    // Calculate maximum gap between consecutive labels
+    let maxGap = 0;
+    for (let i = 1; i < labels.length; i++) {
+      const gap = labels[i]!.pixelY - labels[i - 1]!.pixelY;
+      maxGap = Math.max(maxGap, gap);
+    }
+
+    // Penalty increases with gap size relative to average
+    const gapRatio = maxGap / avgGap;
+    return Math.min(0.3, Math.max(0, (gapRatio - 1.5) * 0.1));
   }
 }
