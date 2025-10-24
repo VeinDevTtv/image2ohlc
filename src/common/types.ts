@@ -246,3 +246,15 @@ export interface TimestampAssignmentResult {
   timeframe: string;
   anchorTimestamp?: string;
 }
+
+export interface RunMeta {
+  image_hash: string;
+  mapping_confidence: number;
+  ocr_summary: {
+    yAxisLabels: YAxisLabel[];
+    xAxisLabels: XAxisLabel[];
+    overallConfidence: number;
+    method: 'ocr' | 'manual' | 'hybrid';
+  };
+  intermediate_files: string[];
+}

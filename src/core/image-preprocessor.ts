@@ -2,6 +2,7 @@ import sharp from 'sharp';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { createHash } from 'crypto';
 import Tesseract from 'tesseract.js';
 import {
   PreprocessingResult,
@@ -24,6 +25,8 @@ import {
   CandleColumn,
   CandleSegmentationResult,
   PixelCoordinates,
+  RunMeta,
+  OHLCData,
 } from '../common/types';
 
 /**
@@ -2674,5 +2677,102 @@ export class ImagePreprocessor {
     const extrapolatedTime = labelTime + (estimatedCandleIndex * intervalMs);
     
     return new Date(extrapolatedTime).toISOString();
+  }
+
+  /**
+   * Exports candles data to JSON and CSV formats with run metadata
+   * @param candles - Array of OHLC data
+   * @param runMeta - Run metadata including image hash, confidence, OCR summary, and intermediate files
+   * @param outputPath - Directory path where to save the exported files
+   * @returns Promise<{jsonPath: string, csvPath: string}> - Paths to the exported files
+   */
+  async exportData(candles: OHLCData[], runMeta: RunMeta, outputPath: string): Promise<{jsonPath: string, csvPath: string}> {
+    try {
+      // Ensure output directory exists
+      await fs.mkdir(outputPath, { recursive: true });
+
+      const jsonPath = join(outputPath, 'candles.json');
+      const csvPath = join(outputPath, 'candles.csv');
+
+      // Prepare JSON export data
+      const jsonData = {
+        candles,
+        runMeta,
+        exportTimestamp: new Date().toISOString(),
+        totalCandles: candles.length,
+      };
+
+      // Export JSON
+      await fs.writeFile(jsonPath, JSON.stringify(jsonData, null, 2), 'utf8');
+
+      // Export CSV
+      await this.exportCsv(candles, csvPath);
+
+      this.logStep('export_data', 'success', `Exported ${candles.length} candles to JSON and CSV formats`);
+
+      return { jsonPath, csvPath };
+    } catch (error) {
+      this.logStep('export_data', 'error', `Failed to export data: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Exports candles data to CSV format
+   * @param candles - Array of OHLC data
+   * @param csvPath - Path to save the CSV file
+   */
+  private async exportCsv(candles: OHLCData[], csvPath: string): Promise<void> {
+    const headers = [
+      'timestamp_ISO',
+      'open',
+      'high',
+      'low',
+      'close',
+      'source_image_hash',
+      'pixel_coords_x',
+      'pixel_coords_y',
+      'confidence',
+      'notes'
+    ];
+
+    const csvRows = [headers.join(',')];
+
+    for (const candle of candles) {
+      const row = [
+        candle.timestamp,
+        candle.open.toString(),
+        candle.high.toString(),
+        candle.low.toString(),
+        candle.close.toString(),
+        candle.sourceImageHash,
+        candle.pixelCoords.x.toString(),
+        candle.pixelCoords.y.toString(),
+        candle.confidence.toString(),
+        candle.notes || ''
+      ];
+
+      // Escape CSV values that contain commas or quotes
+      const escapedRow = row.map(value => {
+        const stringValue = value.toString();
+        if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+          return `"${stringValue.replace(/"/g, '""')}"`;
+        }
+        return stringValue;
+      });
+
+      csvRows.push(escapedRow.join(','));
+    }
+
+    await fs.writeFile(csvPath, csvRows.join('\n'), 'utf8');
+  }
+
+  /**
+   * Generates a hash for the source image
+   * @param imageBuffer - Image buffer data
+   * @returns string - SHA-256 hash of the image
+   */
+  generateImageHash(imageBuffer: Buffer): string {
+    return createHash('sha256').update(imageBuffer).digest('hex');
   }
 }
