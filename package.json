@@ -6,7 +6,8 @@
   "bin": {
     "scan": "./bin/scan.js",
     "preprocess": "./bin/preprocess-cli.js",
-    "segmentation": "./bin/segmentation-cli.js"
+    "segmentation": "./bin/segmentation-cli.js",
+    "evaluate": "./bin/evaluate-cli.js"
   },
   "scripts": {
     "build": "tsc",
@@ -28,6 +29,7 @@
     "segmentation:train": "ts-node bin/segmentation-cli.ts train-model",
     "segmentation:infer": "ts-node bin/segmentation-cli.ts infer",
     "segmentation:pipeline": "ts-node bin/segmentation-cli.ts full-pipeline",
+    "evaluate": "ts-node bin/evaluate-cli.ts",
     "dev:backend": "ts-node backend/server.ts",
     "start:backend": "node dist/backend/server.js"
   },
@@ -42,6 +44,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@types/chart.js": "^2.9.41",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.17",
     "@types/react": "^18.2.55",
@@ -76,10 +79,14 @@
     "@types/sharp": "^0.31.1",
     "@types/tesseract.js": "^0.0.2",
     "@types/uuid": "^9.0.8",
+    "chart.js": "^4.5.1",
+    "chartjs-node-canvas": "^5.0.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
+    "html-pdf-node": "^1.0.8",
+    "jspdf": "^3.0.3",
     "lucide-react": "^0.323.0",
     "onnxruntime-node": "^1.16.3",
     "react": "^18.2.0",
